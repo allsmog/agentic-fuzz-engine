@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+src/*.egg-info/
+runs/
+*.log
+tools/aflpp/
+tools/jazzer/
+tools/libafl/
+tools/llvm/
+tools/sootup-cli/target/
+tools/symqemu/
+tools/z3/

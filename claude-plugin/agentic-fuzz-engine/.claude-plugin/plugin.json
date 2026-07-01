@@ -1,0 +1,13 @@
+{
+  "name": "agentic-fuzz",
+  "displayName": "Agentic Fuzz Engine",
+  "version": "0.1.0",
+  "description": "Claude Code plugin that reimplements C/C++ fuzzing workflows agentically with reference benchmark fidelity fixtures but no external runtime calls.",
+  "author": {
+    "name": "Agentic Fuzz Engine"
+  },
+  "mcpServers": "./.mcp.json",
+  "experimental": {
+    "monitors": "./monitors/monitors.json"
+  }
+}

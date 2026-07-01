@@ -1,0 +1,22 @@
+[project]
+name = "agentic-fuzz-engine"
+version = "0.1.0"
+description = "Agentic local fuzzing engine with Claude Code plugin commands, specialist agents, MCP tools, and dependency-gated backend adapters."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+claude = ["claude-agent-sdk>=0.1.0"]
+runtime = [
+  "pyzmq>=27.0.0",
+  "tree-sitter>=0.25.0",
+  "z3-solver>=4.15.0",
+]
+
+[project.scripts]
+agentic-fuzz-engine = "agentic_fuzz_engine.cli:main"
+agentic-fuzz-engine-mcp = "agentic_fuzz_engine.mcp_stdio:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

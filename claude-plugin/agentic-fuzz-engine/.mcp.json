@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "agentic_fuzz_engine": {
+      "type": "stdio",
+      "command": "bash",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/mcp-server.sh"
+      ],
+      "env": {
+        "AGENTIC_FUZZ_REFERENCE_ROOT": "${AGENTIC_FUZZ_REFERENCE_ROOT}"
+      },
+      "timeout": 600000
+    }
+  }
+}

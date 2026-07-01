@@ -1,0 +1,8 @@
+[
+  {
+    "name": "campaign-status",
+    "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/watch-campaigns.py\"",
+    "description": "Publishes a compact count of plugin-local fuzzing campaigns.",
+    "when": "on-skill-invoke:campaign"
+  }
+]
