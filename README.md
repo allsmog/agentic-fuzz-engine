@@ -1,5 +1,9 @@
 # Agentic Fuzz Engine
 
+<p align="center">
+  <img src="docs/assets/agentic-fuzz-engine-mascot.png" alt="Agentic Fuzz Engine fuzzy robot mascot" width="420">
+</p>
+
 Agentic Fuzz Engine is a local-first agentic fuzzing framework and Claude Code plugin for security testing, vulnerability research, and automated fuzzing workflows. It coordinates specialist agents, MCP tools, benchmark fixtures, fuzzing backends, symbolic execution workers, SARIF reachability checks, and patch validation without requiring hosted infrastructure.
 
 The project is designed for researchers and engineers who want a practical agentic security testing loop around C, C++, and JVM targets while keeping execution explicit, inspectable, and local.
