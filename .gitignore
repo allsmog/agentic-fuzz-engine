@@ -1,8 +1,30 @@
+# --- Python ---
 __pycache__/
 *.py[cod]
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# --- Environments ---
 .venv/
-src/*.egg-info/
+venv/
+.env
+.env.*
+
+# --- Editors / OS ---
+.idea/
+.vscode/
+.DS_Store
+
+# --- Project: runtime output & downloaded/built tools ---
 runs/
 *.log
 tools/aflpp/

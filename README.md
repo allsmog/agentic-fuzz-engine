@@ -40,12 +40,20 @@ This repository is an early local runtime and Claude Code plugin. It is useful f
 │   ├── commands/                        # slash command definitions
 │   ├── skills/                          # workflow instructions
 │   ├── scripts/                         # plugin launch helpers
+│   ├── monitors/                        # monitor metadata
+│   ├── hooks/                           # hook metadata
 │   └── .mcp.json                        # stdio MCP server config
 ├── src/agentic_fuzz_engine/             # local engine and MCP tools
 ├── src/agentic_fuzz_full/               # full-runtime readiness model
 ├── tests/                               # focused regression tests
+├── configs/                             # policy and runtime configs
+├── scripts/                             # repo-level helper scripts
+├── tools/                               # tool wrappers and SootUp CLI source
+├── docs/                                # docs and assets
 ├── ARCHITECTURE.md                      # architecture notes
-└── pyproject.toml                       # Python package metadata
+├── Makefile                             # common developer tasks
+├── pyproject.toml                       # Python package metadata
+└── uv.lock                              # pinned dependency lockfile
 ```
 
 ## Core Capabilities
@@ -94,6 +102,13 @@ The runtime detects local tools and reports readiness:
 - patch validation: temporary source copies, rebuild checks, proof replay, and regression commands
 
 ## Quickstart
+
+Clone the repository:
+
+```bash
+git clone https://github.com/allsmog/agentic-fuzz-engine.git
+cd agentic-fuzz-engine
+```
 
 Create or activate a Python environment, then install the package in editable mode:
 
