@@ -319,6 +319,11 @@ def main(argv: list[str] | None = None) -> int:
     target_scaffold_parser.add_argument("--max-sink-refs", type=int, default=20)
     target_scaffold_parser.add_argument("--force", action="store_true")
     target_scaffold_parser.add_argument("--workspace-root", default=None)
+    target_build_parser = subcommands.add_parser("target-build")
+    target_build_parser.add_argument("project")
+    target_build_parser.add_argument("--only-step", action="append", dest="only_steps", default=[])
+    target_build_parser.add_argument("--timeout-seconds", type=float, default=900)
+    target_build_parser.add_argument("--workspace-root", default=None)
     fuzz_ensemble = subcommands.add_parser("fuzz-ensemble-run")
     fuzz_ensemble.add_argument("run_id")
     fuzz_ensemble.add_argument("--target", required=True)
@@ -843,6 +848,16 @@ def main(argv: list[str] | None = None) -> int:
                 "sink_tag": args.sink_tag,
                 "max_sink_refs": args.max_sink_refs,
                 "force": args.force,
+                "workspace_root": args.workspace_root,
+            },
+        )
+    elif args.command == "target-build":
+        payload = engine.call_tool(
+            "target_build",
+            {
+                "project": args.project,
+                "only_steps": args.only_steps,
+                "timeout_seconds": args.timeout_seconds,
                 "workspace_root": args.workspace_root,
             },
         )

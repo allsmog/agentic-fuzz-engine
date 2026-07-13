@@ -37,6 +37,7 @@ from .runtime_backends import (
     run_symbolic_worker,
     runtime_backend_status,
 )
+from .container_build import build_target
 from .scaffold import scaffold_target, select_targets
 from .state import EngineState
 from .workspace import workspace_init
@@ -355,6 +356,11 @@ class AgenticFuzzEngine:
                 {"name": "string", "sinks_jsonl": "string", "sink_tag": "string", "max_sink_refs": "integer", "force": "boolean", "workspace_root": "string"},
             ),
             _tool(
+                "target_build",
+                "Run the target's declared bounded build steps from .localfuzz/build.json and report bin artifacts.",
+                {"project": "string", "only_steps": "array", "timeout_seconds": "number", "workspace_root": "string"},
+            ),
+            _tool(
                 "workspace_init",
                 "Create or refresh the generated dot-directory workspace (reference-root layout, DooD path maps, docker images, env file, optional asset imports).",
                 {
@@ -558,6 +564,7 @@ class AgenticFuzzEngine:
             "workspace_init": self._workspace_init,
             "target_select": self._target_select,
             "target_scaffold": self._target_scaffold,
+            "target_build": self._target_build,
             "fuzz_ensemble_run": self._fuzz_ensemble_run,
             "symbolic_worker_run": self._symbolic_worker_run,
             "sarif_reachability_run": self._sarif_reachability_run,
@@ -981,6 +988,14 @@ class AgenticFuzzEngine:
             sink_tag=args.get("sink_tag") or None,
             max_sink_refs=int(args.get("max_sink_refs", 20)),
             force=bool(args.get("force", False)),
+        )
+
+    def _target_build(self, args: dict[str, Any]) -> dict[str, Any]:
+        return build_target(
+            project=_required(args, "project"),
+            workspace_root=args.get("workspace_root") or None,
+            only_steps=_string_list(args.get("only_steps"), key="only_steps") or None,
+            timeout_seconds=args.get("timeout_seconds", 900),
         )
 
     def _workspace_init(self, args: dict[str, Any]) -> dict[str, Any]:

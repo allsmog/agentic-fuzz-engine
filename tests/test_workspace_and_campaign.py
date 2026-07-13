@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -86,6 +87,40 @@ class WorkspaceTests(unittest.TestCase):
         )
         self.assertEqual(translate_host_path("/home/user/notes", workspace), "/mnt/outer/home/notes")
         self.assertEqual(translate_host_path("/srv/other", workspace), "/srv/other")
+
+
+class ContainerBuildTests(unittest.TestCase):
+    def test_build_target_runs_steps_with_placeholders_and_stops_on_failure(self) -> None:
+        from agentic_fuzz_engine.container_build import build_target
+        from agentic_fuzz_engine.workspace import workspace_init
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp) / "ws"
+            workspace_init(root=ws, source_dir=tmp, env={})
+            target_dir = ws / "targets" / "c" / "demo"
+            (target_dir / ".localfuzz").mkdir(parents=True)
+            (target_dir / ".localfuzz" / "build.json").write_text(
+                json.dumps(
+                    {
+                        "steps": [
+                            {"name": "ok", "argv": ["/usr/bin/touch", "{bin_dir}/fuzzer"], "env": {}},
+                            {"name": "boom", "argv": ["/bin/false"], "env": {}},
+                            {"name": "after", "argv": ["/bin/true"], "env": {}},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = build_target(project="localfuzz/c/demo", workspace_root=ws, timeout_seconds=30, env=dict(os.environ))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual([step["name"] for step in result["steps"]], ["ok", "boom", "after"])
+        self.assertTrue(result["steps"][0]["ok"])
+        self.assertFalse(result["steps"][1]["ok"])
+        self.assertTrue(result["steps"][2]["skipped"])
+        self.assertEqual(result["blockers"], ["boom: exit 1"])
+        self.assertEqual(result["artifacts"][0]["path"].rsplit("/", 1)[-1], "fuzzer")
 
 
 class ScaffoldTests(unittest.TestCase):
