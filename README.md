@@ -134,10 +134,10 @@ PYTHONPATH=src python -m pytest -q
 
 ## Command Examples
 
-List available MCP-style engine tools:
+List available subcommands:
 
 ```bash
-PYTHONPATH=src python -m agentic_fuzz_engine.cli list-tools
+PYTHONPATH=src python -m agentic_fuzz_engine.cli --help
 ```
 
 Check real backend visibility:
@@ -173,6 +173,33 @@ PYTHONPATH=src python -m agentic_fuzz_engine.cli fuzz-ensemble-run \
   --runs 2 \
   --timeout-seconds 30
 ```
+
+## Workspace Campaign Loop
+
+The engine can drive a fully self-contained campaign from a generated
+dot-directory workspace (default `~/.cache/agentic-fuzz`, override with
+`AGENTIC_FUZZ_WORKSPACE`). The workspace doubles as the reference root
+(`benchmark/projects` + `targets/c` layout) and holds target skeletons,
+build outputs, persistent corpora, and campaign state.
+
+```bash
+# one-time: create the workspace (DooD path maps, docker images, extra mounts, asset imports)
+cli workspace-init --map HOST=OUTER --source-dir /path/to/source --mount HOST=/container:ro --copy SRC=DEST_REL
+
+# pick the next unharnessed sink vector, generate its skeleton, build it
+cli target-select --sinks-jsonl sinks.jsonl
+cli target-scaffold <vector> --sinks-jsonl sinks.jsonl
+cli target-build localfuzz/c/<vector>
+
+# bounded, resource-guarded campaign rounds
+cli campaign-round-run localfuzz/c/<vector> --rounds 4 --klee-config tier.ci.json
+```
+
+Every lane is bounded and sequential: libFuzzer runs with an explicit RSS
+limit and `-max_total_time`, the SymCC corpus sync runs one input at a time
+under a `prlimit` address-space cap, and the KLEE lane runs inside a
+container with `--memory`, `--pids-limit`, and `--cpus` limits. A
+disk-headroom guard aborts work before a volume fills.
 
 ## Agent Roles
 
