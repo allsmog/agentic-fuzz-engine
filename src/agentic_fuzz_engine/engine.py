@@ -1099,16 +1099,16 @@ class AgenticFuzzEngine:
             project=_required(args, "project"),
             run_id=args.get("run_id") or None,
             rounds=int(args.get("rounds", 1)),
-            fuzz_seconds=args.get("fuzz_seconds", 600),
-            rss_limit_mb=int(args.get("rss_limit_mb", 2048)),
-            sync_max_inputs=int(args.get("sync_max_inputs", 32)),
+            fuzz_seconds=args.get("fuzz_seconds"),
+            rss_limit_mb=int(args["rss_limit_mb"]) if args.get("rss_limit_mb") is not None else None,
+            sync_max_inputs=int(args["sync_max_inputs"]) if args.get("sync_max_inputs") is not None else None,
             sync_seconds=args.get("sync_seconds", 600),
             sync_memory_mb=int(args.get("sync_memory_mb", 4096)),
             klee_config=args.get("klee_config") or None,
-            klee_every=int(args.get("klee_every", 4)),
+            klee_every=int(args["klee_every"]) if args.get("klee_every") is not None else None,
             klee_seconds=args.get("klee_seconds", 900),
             workspace_root=args.get("workspace_root") or None,
-            min_free_gb=float(args.get("min_free_gb", 10.0)),
+            min_free_gb=float(args["min_free_gb"]) if args.get("min_free_gb") is not None else None,
         )
 
     def _target_generate(self, args: dict[str, Any]) -> dict[str, Any]:

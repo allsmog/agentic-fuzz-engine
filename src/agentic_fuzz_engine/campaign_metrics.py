@@ -183,6 +183,28 @@ def ledger_append(
     return event
 
 
+def ledger_transition(
+    root: Path,
+    *,
+    name: str,
+    status: str,
+    note: str | None = None,
+    round_index: int | None = None,
+    skip_if_in: set[str] | None = None,
+) -> dict[str, Any] | None:
+    """Append a status event only when it changes the candidate's state.
+
+    ``skip_if_in`` guards automatic transitions from clobbering states the
+    operator owns (e.g. never drop escalated:<rung>/dead back to fuzzing).
+    """
+    current = _ledger_current_state(root).get(name, {}).get("status")
+    if current == status:
+        return None
+    if skip_if_in and (current in skip_if_in or (current or "").startswith("escalated:")):
+        return None
+    return ledger_append(root, name=name, status=status, note=note, round_index=round_index)
+
+
 def _ledger_current_state(root: Path) -> dict[str, dict[str, Any]]:
     path = root / LEDGER_RELATIVE
     state: dict[str, dict[str, Any]] = {}

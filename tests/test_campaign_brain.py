@@ -135,6 +135,65 @@ class PlateauStatusTests(unittest.TestCase):
         self.assertEqual(item["next_rung"], "structured-seeds")
 
 
+class RoundLoopIntegrationTests(unittest.TestCase):
+    def test_rounds_write_metrics_ledger_and_plateau_block(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).parent))
+        from test_workspace_and_campaign import _StubEngine
+
+        from agentic_fuzz_engine.campaign_metrics import candidates_list
+        from agentic_fuzz_engine.campaign_rounds import run_campaign_rounds
+        from agentic_fuzz_engine.workspace import workspace_init
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp) / "ws"
+            workspace_init(root=ws, env={})
+            bin_dir = ws / "bin" / "demo"
+            bin_dir.mkdir(parents=True)
+            fuzzer = bin_dir / "fuzzer"
+            fuzzer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fuzzer.chmod(0o755)
+            crash_dir = Path(tmp) / "crashes"
+            crash_dir.mkdir()
+            (crash_dir / "crash-1").write_bytes(b"boom")
+            engine = _StubEngine(crash_dir)
+
+            result = run_campaign_rounds(
+                engine, project="localfuzz/c/demo", rounds=2, fuzz_seconds=5,
+                workspace_root=ws, env=dict(os.environ),
+            )
+
+            rounds_path = ws / "work" / "demo" / "rounds.jsonl"
+            lines = [json.loads(line) for line in rounds_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(lines), 2)
+            self.assertIn("plateau", result["rounds"][0])
+            listing = candidates_list(workspace_root=ws, env={})
+
+        # stub rounds record findings every round -> fuzzing then confirmed
+        demo = next(item for item in listing["candidates"] if item["name"] == "demo")
+        self.assertEqual(demo["status"], "confirmed")
+
+    def test_policy_overrides_defaults_and_flags_override_policy(self) -> None:
+        from agentic_fuzz_engine.workspace import load_policy, workspace_init
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp) / "ws"
+            workspace_init(root=ws, env={})
+            policy_path = ws / "campaign-policy.json"
+            payload = json.loads(policy_path.read_text(encoding="utf-8"))
+            payload["plateau"]["flat_rounds"] = 5
+            policy_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            policy = load_policy(ws, env={})
+            self.assertEqual(policy["plateau"]["flat_rounds"], 5)
+            self.assertEqual(policy["round"]["fuzz_seconds"], 1800)  # untouched section key survives
+
+            # re-init must not clobber the tuned policy
+            workspace_init(root=ws, env={})
+            self.assertEqual(load_policy(ws, env={})["plateau"]["flat_rounds"], 5)
+
+
 class CandidateLedgerTests(unittest.TestCase):
     def test_ledger_append_fold_and_invalid_status(self) -> None:
         from agentic_fuzz_engine.campaign_metrics import (

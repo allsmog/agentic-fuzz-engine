@@ -23,7 +23,7 @@ from typing import Any, Mapping
 
 from .concolic_sync import run_corpus_sync
 from .runtime_backends import MIN_FREE_DISK_GB, check_disk_headroom
-from .workspace import resolve_workspace_root
+from .workspace import load_policy, resolve_workspace_root
 
 MAX_ROUNDS = 100
 MAX_KLEE_SEED_MERGE = 500
@@ -43,20 +43,28 @@ def run_campaign_rounds(
     project: str,
     run_id: str | None = None,
     rounds: int = 1,
-    fuzz_seconds: int | float = 600,
-    rss_limit_mb: int = 2048,
-    sync_max_inputs: int = 32,
+    fuzz_seconds: int | float | None = None,
+    rss_limit_mb: int | None = None,
+    sync_max_inputs: int | None = None,
     sync_seconds: int | float = 600,
     sync_memory_mb: int = 4096,
     klee_config: str | None = None,
-    klee_every: int = 4,
+    klee_every: int | None = None,
     klee_seconds: int | float = 900,
     workspace_root: str | Path | None = None,
-    min_free_gb: float = MIN_FREE_DISK_GB,
+    min_free_gb: float | None = None,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     environment = dict(os.environ if env is None else env)
     root = resolve_workspace_root(workspace_root, env=environment)
+    # Explicit CLI flags win; the workspace policy file supplies the rest.
+    policy = load_policy(root, env=environment)
+    round_policy = policy.get("round", {})
+    fuzz_seconds = round_policy.get("fuzz_seconds", 600) if fuzz_seconds is None else fuzz_seconds
+    rss_limit_mb = int(round_policy.get("rss_limit_mb", 2048)) if rss_limit_mb is None else rss_limit_mb
+    sync_max_inputs = int(round_policy.get("sync_max_inputs", 32)) if sync_max_inputs is None else sync_max_inputs
+    klee_every = int(round_policy.get("klee_every", 4)) if klee_every is None else klee_every
+    min_free_gb = float(policy.get("disk", {}).get("min_free_gb", MIN_FREE_DISK_GB)) if min_free_gb is None else min_free_gb
     # Fuzz binaries link uninstrumented dependency .so's whose static-init
     # allocations LSan reports (and whose exit-time suppression pass can wedge
     # on the symbolizer pipe). Memory corruption, not leaks, is the campaign
@@ -103,6 +111,15 @@ def run_campaign_rounds(
     if blockers:
         return _summary(active_run_id, target, rounds_done=[], corpus=corpus, blockers=blockers)
 
+    from .campaign_metrics import ledger_transition, plateau_status
+
+    ledger_transition(root, name=name, status="fuzzing", skip_if_in={"plateaued", "confirmed", "dead"})
+
+    dict_path = root / "targets" / "c" / name / f"{name}.dict"
+    dict_args = []
+    if _dictionary_has_tokens(dict_path):
+        dict_args = [f"-dict={dict_path}"]
+
     replay_command = [str(fuzzer), "{poc}"]
     round_summaries = []
     for index in range(1, round_budget + 1):
@@ -128,6 +145,7 @@ def run_campaign_rounds(
                     f"-max_total_time={max(1, int(fuzz_seconds))}",
                     "-detect_leaks=0",
                     "-print_final_stats=1",
+                    *dict_args,
                 ],
                 "workers": ["libfuzzer"],
                 "runs": 1_000_000,
@@ -236,10 +254,41 @@ def run_campaign_rounds(
                 "next_command": "campaign-round-run" if index < round_budget else "campaign-report",
             },
         )
+        if findings:
+            ledger_transition(root, name=name, status="confirmed", round_index=index,
+                              note=f"{findings} finding(s) recorded")
+
         _append_round_metrics(root / "work" / name / "rounds.jsonl", run_id=active_run_id, summary=summary)
+
+        assessment = plateau_status(workspace_root=root, target=f"localfuzz/c/{name}", env=environment)
+        target_assessment = assessment["targets"][0] if assessment.get("targets") else {}
+        summary["plateau"] = {
+            "verdict": target_assessment.get("verdict"),
+            "next_rung": target_assessment.get("next_rung"),
+            "flat_rounds": target_assessment.get("flat_rounds"),
+        }
+        if str(target_assessment.get("verdict", "")).startswith("plateaued"):
+            ledger_transition(
+                root, name=name, status="plateaued", round_index=index,
+                note=target_assessment.get("verdict"),
+                skip_if_in={"confirmed", "dead"},
+            )
         round_summaries.append(summary)
 
     return _summary(active_run_id, target, rounds_done=round_summaries, corpus=corpus, blockers=blockers)
+
+
+def _dictionary_has_tokens(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                return True
+    except OSError:
+        return False
+    return False
 
 
 def _append_round_metrics(path: Path, *, run_id: str, summary: dict[str, Any]) -> None:
