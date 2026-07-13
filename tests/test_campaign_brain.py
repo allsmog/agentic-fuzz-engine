@@ -246,6 +246,71 @@ class CandidateLedgerTests(unittest.TestCase):
         self.assertEqual(second["events_appended"], [])
 
 
+class KleePackGenTests(unittest.TestCase):
+    def test_pack_derives_flags_and_link_sources(self) -> None:
+        from agentic_fuzz_engine.harness_gen import generate_klee_pack
+        from agentic_fuzz_engine.workspace import workspace_init
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            src_tree = tmp_path / "srcroot"
+            (src_tree / "code").mkdir(parents=True)
+            (src_tree / "code" / "dep.cpp").write_text("int dep() { return 1; }\n", encoding="utf-8")
+            ws = tmp_path / "ws"
+            workspace_init(root=ws, source_dir=src_tree, env={})
+            target_dir = ws / "targets" / "c" / "demo"
+            (target_dir / ".localfuzz").mkdir(parents=True)
+            (target_dir / "harness.cpp").write_text("// harness with FUZZ_MAIN\n", encoding="utf-8")
+            shared_inc = ws / "targets" / "c" / "_shared"
+            shared_inc.mkdir(parents=True)
+            (shared_inc / "helper.h").write_text("#pragma once\n", encoding="utf-8")
+            (target_dir / ".localfuzz" / "build.json").write_text(
+                json.dumps(
+                    {
+                        "steps": [
+                            {
+                                "name": "symcc",
+                                "argv": [
+                                    "sym++", "-std=c++17", "-DFUZZ_MAIN", "-DOPENSSL3",
+                                    f"-I{src_tree}/code", f"-I{shared_inc}",
+                                    str(target_dir / "harness.cpp"),
+                                    f"{src_tree}/code/dep.cpp",
+                                    "-o", "out",
+                                ],
+                                "env": {},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = generate_klee_pack(name="demo", workspace_root=ws, max_time_seconds=60, env={})
+
+            entry = result["entry"]
+            self.assertEqual(
+                entry["linkSources"],
+                ["/work/harnesses/gen/demo-pack.cpp", f"{src_tree}/code/dep.cpp"],
+            )
+            self.assertTrue(entry["source"].endswith("demo-pack-main.cpp"))
+            wrapper_text = (ws / "klee" / "harnesses" / "gen" / "demo-pack-main.cpp").read_text(encoding="utf-8")
+            self.assertIn("klee_make_symbolic(data", wrapper_text)
+            self.assertIn("klee_assume(size <= sizeof data)", wrapper_text)
+            self.assertIn("-DOPENSSL3", entry["compileArgs"])
+            self.assertIn(f"-I{src_tree}/code", entry["compileArgs"])
+            self.assertIn("-I/work/gen-include/demo/_shared", entry["compileArgs"])
+            self.assertTrue((ws / "klee" / "gen-include" / "demo" / "_shared" / "helper.h").is_file())
+            self.assertNotIn("--emit-all-errors", entry["kleeArgs"])
+            self.assertNotIn("-DFUZZ_MAIN", entry["compileArgs"])
+            ci = json.loads((ws / "klee" / "gen-packs.ci.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(ci["targets"]), 1)
+
+            # regenerating replaces the entry rather than duplicating it
+            generate_klee_pack(name="demo", workspace_root=ws, env={})
+            ci = json.loads((ws / "klee" / "gen-packs.ci.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(ci["targets"]), 1)
+
+
 class GcTests(unittest.TestCase):
     def _write_fake_merger(self, path: Path) -> None:
         # honors: fuzzer -merge=1 <new> <old> ... -> writes half the files

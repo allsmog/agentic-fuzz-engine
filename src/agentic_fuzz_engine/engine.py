@@ -24,7 +24,7 @@ from .gc import run_campaign_gc
 from .grading import grade_finding_artifact
 from .grammar import infer_grammar_from_source
 from .guardrails import audit_runtime_guard_runtime_calls
-from .harness_gen import generate_all, generate_target
+from .harness_gen import generate_all, generate_klee_pack, generate_target
 from .minimization import minimize_pov_artifact
 from .owned_replay import run_owned_direct_asan_replay
 from .oss_fuzz_build import run_owned_oss_fuzz_build, run_owned_oss_fuzz_build_replay
@@ -380,6 +380,11 @@ class AgenticFuzzEngine:
                 {"project": "string", "only_steps": "array", "timeout_seconds": "number", "workspace_root": "string"},
             ),
             _tool(
+                "klee_pack_gen",
+                "Convert an existing libFuzzer target into a klee-ng ci pack entry (FUZZ_MAIN compile, derived flags/linkSources, merged into gen-packs.ci.json).",
+                {"name": "string", "max_time_seconds": "integer", "workspace_root": "string"},
+            ),
+            _tool(
                 "campaign_gc",
                 "Reclaim disk: bounded corpus minimize (-merge=1 with atomic swap) plus run-dir and KLEE-output retention pruning, containment-checked.",
                 {"target": "string", "workspace_root": "string"},
@@ -640,6 +645,7 @@ class AgenticFuzzEngine:
             "campaign_round_run": self._campaign_round_run,
             "plateau_status": self._plateau_status,
             "campaign_gc": self._campaign_gc,
+            "klee_pack_gen": self._klee_pack_gen,
             "candidate_ledger": self._candidate_ledger,
             "fuzz_ensemble_run": self._fuzz_ensemble_run,
             "symbolic_worker_run": self._symbolic_worker_run,
@@ -1072,6 +1078,13 @@ class AgenticFuzzEngine:
             workspace_root=args.get("workspace_root") or None,
             only_steps=_string_list(args.get("only_steps"), key="only_steps") or None,
             timeout_seconds=args.get("timeout_seconds", 900),
+        )
+
+    def _klee_pack_gen(self, args: dict[str, Any]) -> dict[str, Any]:
+        return generate_klee_pack(
+            name=_required(args, "name"),
+            workspace_root=args.get("workspace_root") or None,
+            max_time_seconds=int(args.get("max_time_seconds", 120)),
         )
 
     def _campaign_gc(self, args: dict[str, Any]) -> dict[str, Any]:

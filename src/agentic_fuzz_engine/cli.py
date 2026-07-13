@@ -334,6 +334,10 @@ def main(argv: list[str] | None = None) -> int:
     target_build_parser.add_argument("--only-step", action="append", dest="only_steps", default=[])
     target_build_parser.add_argument("--timeout-seconds", type=float, default=900)
     target_build_parser.add_argument("--workspace-root", default=None)
+    pack_parser = subcommands.add_parser("klee-pack-gen")
+    pack_parser.add_argument("name")
+    pack_parser.add_argument("--max-time-seconds", type=int, default=120)
+    pack_parser.add_argument("--workspace-root", default=None)
     gc_parser = subcommands.add_parser("campaign-gc")
     gc_parser.add_argument("target", nargs="?", default=None)
     gc_parser.add_argument("--workspace-root", default=None)
@@ -924,6 +928,11 @@ def main(argv: list[str] | None = None) -> int:
                 "timeout_seconds": args.timeout_seconds,
                 "workspace_root": args.workspace_root,
             },
+        )
+    elif args.command == "klee-pack-gen":
+        payload = engine.call_tool(
+            "klee_pack_gen",
+            {"name": args.name, "max_time_seconds": args.max_time_seconds, "workspace_root": args.workspace_root},
         )
     elif args.command == "campaign-gc":
         payload = engine.call_tool(
