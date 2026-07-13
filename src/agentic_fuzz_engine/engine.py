@@ -38,6 +38,7 @@ from .runtime_backends import (
     run_symbolic_worker,
     runtime_backend_status,
 )
+from .campaign_metrics import candidates_list, candidates_sync, candidates_update, plateau_status
 from .campaign_rounds import run_campaign_rounds
 from .concolic_sync import run_corpus_sync
 from .container_build import build_target
@@ -378,6 +379,16 @@ class AgenticFuzzEngine:
                 {"project": "string", "only_steps": "array", "timeout_seconds": "number", "workspace_root": "string"},
             ),
             _tool(
+                "plateau_status",
+                "Fold per-round metrics into per-target plateau verdicts and next-rung recommendations (signals only; no side effects).",
+                {"target": "string", "workspace_root": "string"},
+            ),
+            _tool(
+                "candidate_ledger",
+                "Candidate lifecycle ledger: sync from sink inventory + generate.json, list current states/counts, or append a manual status event.",
+                {"action": "string", "name": "string", "status": "string", "note": "string", "sinks_jsonl": "string", "top": "integer", "workspace_root": "string"},
+            ),
+            _tool(
                 "campaign_round_run",
                 "Run bounded sequential campaign rounds (fuzz -> symcc sync -> periodic klee -> ASAN-replay intake -> dedupe -> checkpoint) with disk-headroom guards.",
                 {
@@ -621,6 +632,8 @@ class AgenticFuzzEngine:
             "target_generate": self._target_generate,
             "symbolic_corpus_sync": self._symbolic_corpus_sync,
             "campaign_round_run": self._campaign_round_run,
+            "plateau_status": self._plateau_status,
+            "candidate_ledger": self._candidate_ledger,
             "fuzz_ensemble_run": self._fuzz_ensemble_run,
             "symbolic_worker_run": self._symbolic_worker_run,
             "sarif_reachability_run": self._sarif_reachability_run,
@@ -1053,6 +1066,32 @@ class AgenticFuzzEngine:
             only_steps=_string_list(args.get("only_steps"), key="only_steps") or None,
             timeout_seconds=args.get("timeout_seconds", 900),
         )
+
+    def _plateau_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        return plateau_status(
+            workspace_root=args.get("workspace_root") or None,
+            target=args.get("target") or None,
+        )
+
+    def _candidate_ledger(self, args: dict[str, Any]) -> dict[str, Any]:
+        action = str(args.get("action") or "list")
+        workspace_root = args.get("workspace_root") or None
+        if action == "sync":
+            return candidates_sync(
+                sinks_jsonl=_required(args, "sinks_jsonl"),
+                workspace_root=workspace_root,
+                top=int(args.get("top", 50)),
+            )
+        if action == "update":
+            return candidates_update(
+                name=_required(args, "name"),
+                status=_required(args, "status"),
+                note=args.get("note") or None,
+                workspace_root=workspace_root,
+            )
+        if action == "list":
+            return candidates_list(workspace_root=workspace_root)
+        raise ValueError("candidate_ledger action must be sync, list, or update")
 
     def _campaign_round_run(self, args: dict[str, Any]) -> dict[str, Any]:
         return run_campaign_rounds(

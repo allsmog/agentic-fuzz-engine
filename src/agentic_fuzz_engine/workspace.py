@@ -20,6 +20,20 @@ from pathlib import Path
 from typing import Any, Mapping
 
 WORKSPACE_ENV = "AGENTIC_FUZZ_WORKSPACE"
+POLICY_FILE_NAME = "campaign-policy.json"
+DEFAULT_POLICY: dict[str, Any] = {
+    "round": {"fuzz_seconds": 1800, "sync_max_inputs": 32, "klee_every": 4, "rss_limit_mb": 2048},
+    "plateau": {"metric": "features", "flat_rounds": 3},
+    "ladder": ["dictionary", "structured-seeds", "klee-directed", "symcc-long"],
+    "gc": {
+        "gc_every": 5,
+        "run_retention": 10,
+        "klee_out_retention": 5,
+        "gc_corpus_min_files": 2000,
+        "gc_corpus_max_mb": 512,
+    },
+    "disk": {"min_free_gb": 10},
+}
 KLEE_IMAGE_ENV = "AGENTIC_FUZZ_KLEE_IMAGE"
 WORKSPACE_CONFIG_NAME = "workspace.json"
 WORKSPACE_ENV_FILE = "env.sh"
@@ -51,6 +65,25 @@ def load_workspace(path: str | Path | None = None, *, env: Mapping[str, str] | N
     config = json.loads(config_path.read_text(encoding="utf-8"))
     config["root"] = str(root)
     return config
+
+
+def load_policy(root: str | Path | None = None, *, env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Campaign policy: workspace file overrides defaults, section-wise."""
+    workspace_root = resolve_workspace_root(root, env=env)
+    policy = json.loads(json.dumps(DEFAULT_POLICY))
+    policy_path = workspace_root / POLICY_FILE_NAME
+    if policy_path.is_file():
+        try:
+            overrides = json.loads(policy_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            overrides = {}
+        for section, value in overrides.items():
+            if isinstance(value, dict) and isinstance(policy.get(section), dict):
+                policy[section].update(value)
+            else:
+                policy[section] = value
+    policy["_path"] = str(policy_path)
+    return policy
 
 
 def translate_host_path(path: str | Path, workspace: Mapping[str, Any]) -> str:
@@ -120,6 +153,9 @@ def workspace_init(
         json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     (workspace_root / WORKSPACE_ENV_FILE).write_text(_render_env_file(workspace_root, image), encoding="utf-8")
+    policy_path = workspace_root / POLICY_FILE_NAME
+    if not policy_path.exists():  # never clobber a tuned policy
+        policy_path.write_text(json.dumps(DEFAULT_POLICY, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     return {
         "ok": not blockers,

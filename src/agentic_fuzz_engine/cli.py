@@ -334,6 +334,17 @@ def main(argv: list[str] | None = None) -> int:
     target_build_parser.add_argument("--only-step", action="append", dest="only_steps", default=[])
     target_build_parser.add_argument("--timeout-seconds", type=float, default=900)
     target_build_parser.add_argument("--workspace-root", default=None)
+    plateau_parser = subcommands.add_parser("plateau-status")
+    plateau_parser.add_argument("target", nargs="?", default=None)
+    plateau_parser.add_argument("--workspace-root", default=None)
+    candidates_parser = subcommands.add_parser("candidates")
+    candidates_parser.add_argument("action", choices=("sync", "list", "update"))
+    candidates_parser.add_argument("name", nargs="?", default=None)
+    candidates_parser.add_argument("--status", default=None)
+    candidates_parser.add_argument("--note", default=None)
+    candidates_parser.add_argument("--sinks-jsonl", default=None)
+    candidates_parser.add_argument("--top", type=int, default=50)
+    candidates_parser.add_argument("--workspace-root", default=None)
     round_run_parser = subcommands.add_parser("campaign-round-run")
     round_run_parser.add_argument("project")
     round_run_parser.add_argument("--run-id", default=None)
@@ -908,6 +919,23 @@ def main(argv: list[str] | None = None) -> int:
                 "project": args.project,
                 "only_steps": args.only_steps,
                 "timeout_seconds": args.timeout_seconds,
+                "workspace_root": args.workspace_root,
+            },
+        )
+    elif args.command == "plateau-status":
+        payload = engine.call_tool(
+            "plateau_status", {"target": args.target, "workspace_root": args.workspace_root}
+        )
+    elif args.command == "candidates":
+        payload = engine.call_tool(
+            "candidate_ledger",
+            {
+                "action": args.action,
+                "name": args.name,
+                "status": args.status,
+                "note": args.note,
+                "sinks_jsonl": args.sinks_jsonl,
+                "top": args.top,
                 "workspace_root": args.workspace_root,
             },
         )
