@@ -23,6 +23,7 @@ from .full_campaign import run_owned_local_full_campaign
 from .grading import grade_finding_artifact
 from .grammar import infer_grammar_from_source
 from .guardrails import audit_runtime_guard_runtime_calls
+from .harness_gen import generate_target
 from .minimization import minimize_pov_artifact
 from .owned_replay import run_owned_direct_asan_replay
 from .oss_fuzz_build import run_owned_oss_fuzz_build, run_owned_oss_fuzz_build_replay
@@ -358,6 +359,18 @@ class AgenticFuzzEngine:
                 {"name": "string", "sinks_jsonl": "string", "sink_tag": "string", "max_sink_refs": "integer", "force": "boolean", "workspace_root": "string"},
             ),
             _tool(
+                "target_generate",
+                "Generate a target's harness + build recipe from a workspace generator spec (type_enum / direct_call / symbolic_string); emit an authoring workorder when generation or validation falls short.",
+                {
+                    "name": "string",
+                    "spec": "string",
+                    "sinks_jsonl": "string",
+                    "sink_tag": "string",
+                    "validate": "boolean",
+                    "workspace_root": "string",
+                },
+            ),
+            _tool(
                 "target_build",
                 "Run the target's declared bounded build steps from .localfuzz/build.json and report bin artifacts.",
                 {"project": "string", "only_steps": "array", "timeout_seconds": "number", "workspace_root": "string"},
@@ -603,6 +616,7 @@ class AgenticFuzzEngine:
             "target_select": self._target_select,
             "target_scaffold": self._target_scaffold,
             "target_build": self._target_build,
+            "target_generate": self._target_generate,
             "symbolic_corpus_sync": self._symbolic_corpus_sync,
             "campaign_round_run": self._campaign_round_run,
             "fuzz_ensemble_run": self._fuzz_ensemble_run,
@@ -1054,6 +1068,17 @@ class AgenticFuzzEngine:
             klee_seconds=args.get("klee_seconds", 900),
             workspace_root=args.get("workspace_root") or None,
             min_free_gb=float(args.get("min_free_gb", 10.0)),
+        )
+
+    def _target_generate(self, args: dict[str, Any]) -> dict[str, Any]:
+        return generate_target(
+            name=_required(args, "name"),
+            spec=_required(args, "spec"),
+            workspace_root=args.get("workspace_root") or None,
+            sinks_jsonl=args.get("sinks_jsonl") or None,
+            sink_tag=args.get("sink_tag") or None,
+            validate=bool(args.get("validate", False)),
+            engine=self,
         )
 
     def _symbolic_corpus_sync(self, args: dict[str, Any]) -> dict[str, Any]:

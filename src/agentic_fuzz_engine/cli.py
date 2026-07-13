@@ -320,6 +320,13 @@ def main(argv: list[str] | None = None) -> int:
     target_scaffold_parser.add_argument("--max-sink-refs", type=int, default=20)
     target_scaffold_parser.add_argument("--force", action="store_true")
     target_scaffold_parser.add_argument("--workspace-root", default=None)
+    target_generate_parser = subcommands.add_parser("target-generate")
+    target_generate_parser.add_argument("name")
+    target_generate_parser.add_argument("--spec", required=True)
+    target_generate_parser.add_argument("--sinks-jsonl", default=None)
+    target_generate_parser.add_argument("--sink-tag", default=None)
+    target_generate_parser.add_argument("--validate", action="store_true")
+    target_generate_parser.add_argument("--workspace-root", default=None)
     target_build_parser = subcommands.add_parser("target-build")
     target_build_parser.add_argument("project")
     target_build_parser.add_argument("--only-step", action="append", dest="only_steps", default=[])
@@ -875,6 +882,18 @@ def main(argv: list[str] | None = None) -> int:
                 "sink_tag": args.sink_tag,
                 "max_sink_refs": args.max_sink_refs,
                 "force": args.force,
+                "workspace_root": args.workspace_root,
+            },
+        )
+    elif args.command == "target-generate":
+        payload = engine.call_tool(
+            "target_generate",
+            {
+                "name": args.name,
+                "spec": args.spec,
+                "sinks_jsonl": args.sinks_jsonl,
+                "sink_tag": args.sink_tag,
+                "validate": args.validate,
                 "workspace_root": args.workspace_root,
             },
         )
