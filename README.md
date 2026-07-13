@@ -201,9 +201,25 @@ cli target-build localfuzz/c/<vector>
 cli target-generate <vector> --spec <spec> --sinks-jsonl sinks.jsonl --validate
 cli target-generate --all --spec <spec> --sinks-jsonl sinks.jsonl --max-targets 10
 
-# bounded, resource-guarded campaign rounds
+# bounded, resource-guarded campaign rounds (defaults from campaign-policy.json)
 cli campaign-round-run localfuzz/c/<vector> --rounds 4 --klee-config tier.ci.json
+
+# the campaign brain: budget allocation over many targets
+cli candidates sync --sinks-jsonl sinks.jsonl   # lifecycle ledger from the sink inventory
+cli plateau-status                              # per-target verdicts + next escalation rung
+cli candidates update <vector> --status escalated:dictionary --note "..."
+cli klee-pack-gen <vector>                      # plateaued libFuzzer target -> klee ci pack
+cli campaign-gc                                 # resumable corpus minimize + retention pruning
 ```
+
+Rounds append durable metrics to `work/<target>/rounds.jsonl` (true libFuzzer
+coverage/feature counts, parsed pre-clipping); `plateau-status` folds them
+into `growing / plateaued / insufficient-data` verdicts and recommends the
+next untried rung from the policy ladder. The ledger transitions
+automatically (`fuzzing`, `plateaued`, `confirmed`); `escalated:<rung>` and
+`dead` are operator decisions — dead budget gets reallocated instead of
+silently burned. GC runs every N rounds: corpus minimization is resumable
+(`-merge_control_file`) and only swaps atomically on clean completion.
 
 Every lane is bounded and sequential: libFuzzer runs with an explicit RSS
 limit and `-max_total_time`, the SymCC corpus sync runs one input at a time
