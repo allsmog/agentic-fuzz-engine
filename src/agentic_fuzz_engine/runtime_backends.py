@@ -8,11 +8,12 @@ import shutil
 import subprocess
 from hashlib import sha256
 from pathlib import Path
-from time import monotonic
+from time import monotonic, time as wall_time
 from typing import Any, Mapping
 
 from .execution import FORBIDDEN_ARG_FRAGMENTS, _clip, _normalize_command
 from .patching import validate_unified_diff
+from .workspace import KLEE_IMAGE_ENV, DEFAULT_KLEE_IMAGE, load_workspace, translate_host_path
 
 
 MAX_RUNTIME_TIMEOUT_SECONDS = 3600.0
@@ -34,10 +35,11 @@ def runtime_backend_status(*, env: Mapping[str, str] | None = None) -> dict[str,
             },
         },
         "symbolic_stack": {
-            "title": "SymCC/SymQEMU/Z3 symbolic execution",
+            "title": "SymCC/SymQEMU/KLEE/Z3 symbolic execution",
             "checks": {
                 "symcc": _binary_check("symcc", environment),
                 "symqemu": _binary_any_check(("symqemu", "symqemu-x86_64"), environment),
+                "klee_ng": _klee_image_check(environment),
                 "z3": _python_module_check("z3"),
             },
         },
@@ -176,14 +178,16 @@ def run_symbolic_worker(
     command: list[str] | str | None = None,
     constraints_smt2_b64: str | None = None,
     output_dir: str | Path | None = None,
+    klee_config: str | None = None,
+    workspace_root: str | Path | None = None,
     timeout_seconds: int | float = 60,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     environment = dict(os.environ if env is None else env)
     timeout = _bounded_runtime_timeout(timeout_seconds)
     selected_mode = mode.lower().strip()
-    if selected_mode not in {"symcc", "symqemu", "z3"}:
-        raise ValueError("mode must be one of symcc, symqemu, z3")
+    if selected_mode not in {"symcc", "symqemu", "z3", "klee"}:
+        raise ValueError("mode must be one of symcc, symqemu, z3, klee")
 
     work = Path(work_dir).expanduser().resolve()
     out = Path(output_dir).expanduser().resolve() if output_dir else work / selected_mode / "outputs"
@@ -195,6 +199,16 @@ def run_symbolic_worker(
         result = _run_z3_solver(constraints_smt2_b64=constraints_smt2_b64, status=status)
     elif selected_mode == "symcc":
         result = _run_symcc(command=command, work=work, output_dir=out, timeout_seconds=timeout, status=status, env=environment)
+    elif selected_mode == "klee":
+        result = _run_klee_ng(
+            klee_config=klee_config,
+            command=command,
+            output_dir=out,
+            timeout_seconds=timeout,
+            status=status,
+            env=environment,
+            workspace_root=workspace_root,
+        )
     else:
         result = _run_symqemu(command=command, work=work, output_dir=out, timeout_seconds=timeout, status=status, env=environment)
 
@@ -495,6 +509,196 @@ def _run_libafl(
     )
     run = _run_command(argv, cwd=crash_dir.parent, timeout_seconds=timeout_seconds, env=env)
     return {"worker": "libafl", "executed": True, "crash_dir": str(crash_dir), "run": run, "blockers": [] if not run["timed_out"] else ["timeout"]}
+
+
+MAX_KLEE_EXTRACTED_TESTS = 2000
+MIN_FREE_DISK_GB = 10.0
+DEFAULT_KLEE_MEMORY_GB = 16
+DEFAULT_KLEE_PIDS_LIMIT = 1024
+DEFAULT_KLEE_CPUS = 8
+
+
+def check_disk_headroom(path: str | Path, *, min_free_gb: float = MIN_FREE_DISK_GB) -> dict[str, Any]:
+    """Refuse to start disk-hungry work when the volume is nearly full.
+
+    A fuzz/symbolic campaign that fills the volume takes down every other
+    consumer of it (build caches, container state), so this is a hard guard,
+    not a warning.
+    """
+    target = Path(path).expanduser()
+    probe = target if target.exists() else target.parent
+    usage = shutil.disk_usage(probe)
+    free_gb = usage.free / 1_073_741_824
+    ok = free_gb >= min_free_gb
+    return {
+        "ok": ok,
+        "path": str(probe),
+        "free_gb": round(free_gb, 2),
+        "min_free_gb": min_free_gb,
+        "blocker": None if ok else f"only {free_gb:.1f} GiB free on {probe} (need >= {min_free_gb:g} GiB); free space before fuzzing",
+    }
+
+
+def _klee_image_check(environment: Mapping[str, str]) -> dict[str, Any]:
+    image = environment.get(KLEE_IMAGE_ENV) or DEFAULT_KLEE_IMAGE
+    docker = shutil.which("docker", path=environment.get("PATH"))
+    if not docker:
+        return {"ok": False, "path": None, "detail": f"docker not on PATH (image {image})"}
+    try:
+        proc = subprocess.run(
+            [docker, "image", "inspect", image, "--format", "{{.Id}}"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "path": None, "detail": f"docker image inspect failed: {exc}"}
+    if proc.returncode != 0:
+        return {"ok": False, "path": None, "detail": f"image not present: {image}"}
+    return {"ok": True, "path": image, "detail": None}
+
+
+def _run_klee_ng(
+    *,
+    klee_config: str | None,
+    command: list[str] | str | None,
+    output_dir: Path,
+    timeout_seconds: float,
+    status: dict[str, Any],
+    env: Mapping[str, str],
+    workspace_root: str | Path | None,
+) -> dict[str, Any]:
+    if not status["klee_ng"]["ok"]:
+        return {"ok": False, "executed": False, "blockers": [f"missing klee-ng backend: {status['klee_ng'].get('detail')}"]}
+    if not klee_config:
+        return {"ok": False, "executed": False, "blockers": ["missing klee_config (ci JSON under the workspace klee dir)"]}
+    try:
+        workspace = load_workspace(workspace_root, env=env)
+    except FileNotFoundError as exc:
+        return {"ok": False, "executed": False, "blockers": [str(exc)]}
+
+    root = Path(workspace["root"])
+    klee_dir = (root / "klee").resolve()
+    if not klee_dir.is_dir():
+        return {"ok": False, "executed": False, "blockers": [f"workspace klee dir missing: {klee_dir}"]}
+
+    config_path = Path(klee_config)
+    config_path = (config_path if config_path.is_absolute() else klee_dir / config_path).resolve()
+    if not config_path.is_file():
+        return {"ok": False, "executed": False, "blockers": [f"klee ci config not found: {config_path}"]}
+    try:
+        config_rel = config_path.relative_to(klee_dir)
+    except ValueError:
+        return {"ok": False, "executed": False, "blockers": [f"klee ci config must live under {klee_dir}"]}
+
+    headroom = check_disk_headroom(klee_dir)
+    if not headroom["ok"]:
+        return {"ok": False, "executed": False, "disk": headroom, "blockers": [headroom["blocker"]]}
+
+    image = str(status["klee_ng"]["path"] or DEFAULT_KLEE_IMAGE)
+    docker_config = workspace.get("docker") or {}
+    memory_gb = int(docker_config.get("klee_memory_gb") or DEFAULT_KLEE_MEMORY_GB)
+    pids_limit = int(docker_config.get("klee_pids_limit") or DEFAULT_KLEE_PIDS_LIMIT)
+    cpus = int(docker_config.get("klee_cpus") or DEFAULT_KLEE_CPUS)
+    mount_args = ["-v", f"{translate_host_path(klee_dir, workspace)}:/work"]
+    scripts_dir = klee_dir / "scripts"
+    if scripts_dir.is_dir():
+        mount_args += ["-v", f"{translate_host_path(scripts_dir, workspace)}:/opt/klee-ng/src/scripts:ro"]
+    source_dir = workspace.get("source_dir")
+    if source_dir:
+        mount_args += ["-v", f"{translate_host_path(source_dir, workspace)}:{source_dir}:ro"]
+    for mount in workspace.get("extra_mounts", []):
+        host = mount.get("host")
+        container = mount.get("container")
+        if not host or not container:
+            continue
+        mode = "ro" if str(mount.get("mode", "rw")) == "ro" else "rw"
+        mount_args += ["-v", f"{translate_host_path(host, workspace)}:{container}:{mode}"]
+
+    container_name = f"agentic-fuzz-klee-{os.getpid()}-{int(monotonic() * 1000) % 1_000_000}"
+    argv = [
+        "docker", "run", "--rm", "--name", container_name,
+        f"--memory={memory_gb}g",
+        f"--memory-swap={memory_gb}g",
+        f"--pids-limit={pids_limit}",
+        f"--cpus={cpus}",
+        *mount_args,
+        image,
+        "/opt/klee-ng/src/scripts/klee-ng-ci",
+        f"/work/{config_rel}",
+        *(_runtime_command(command) if command else []),
+    ]
+    wall_started = wall_time()
+    run = _run_command(argv, cwd=klee_dir, timeout_seconds=timeout_seconds, env=env)
+    if run["timed_out"]:
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, text=True, timeout=30, check=False)
+
+    extraction = _extract_klee_tests(klee_dir / "klee-ng-out", output_dir, newer_than=wall_started - 5.0)
+    ok = run["exit_code"] == 0 and not run["timed_out"]
+    blockers = [] if ok else [f"klee-ng ci {'timed out' if run['timed_out'] else 'failed'}"]
+    return {
+        "ok": ok,
+        "executed": True,
+        "image": image,
+        "config": str(config_rel),
+        "container": container_name,
+        "limits": {"memory_gb": memory_gb, "pids_limit": pids_limit, "cpus": cpus},
+        "disk": headroom,
+        "run": run,
+        "extraction": extraction,
+        "blockers": blockers,
+    }
+
+
+def _extract_klee_tests(out_root: Path, output_dir: Path, *, newer_than: float | None = None) -> dict[str, Any]:
+    """Convert klee-ng JSON test files into raw seed bytes + error reports.
+
+    Seeds land in ``output_dir/seeds`` (one file per symbolic input) so the
+    corpus-import path picks them up; failing tests are copied verbatim into
+    ``output_dir/errors`` for crash intake.
+    """
+    seeds_dir = output_dir / "seeds"
+    errors_dir = output_dir / "errors"
+    seeds_dir.mkdir(parents=True, exist_ok=True)
+    errors_dir.mkdir(parents=True, exist_ok=True)
+    seeds = 0
+    errors = 0
+    scanned = 0
+    if not out_root.is_dir():
+        return {"scanned": 0, "seeds_written": 0, "errors_written": 0, "out_root": str(out_root)}
+    for test_path in sorted(out_root.glob("*/*/test*.json")):
+        if scanned >= MAX_KLEE_EXTRACTED_TESTS:
+            break
+        if newer_than is not None and test_path.stat().st_mtime < newer_than:
+            continue
+        scanned += 1
+        try:
+            payload = json.loads(test_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        label = f"{test_path.parent.parent.name}-{test_path.parent.name}-{test_path.stem}"
+        for input_obj in payload.get("inputs", []):
+            data = input_obj.get("data")
+            if not isinstance(data, list):
+                continue
+            try:
+                blob = bytes(int(item) & 0xFF for item in data)
+            except (TypeError, ValueError):
+                continue
+            (seeds_dir / f"{label}-{input_obj.get('name', 'input')}.bin").write_bytes(blob)
+            seeds += 1
+        if payload.get("error"):
+            shutil.copy2(test_path, errors_dir / f"{label}.json")
+            errors += 1
+    return {
+        "scanned": scanned,
+        "seeds_written": seeds,
+        "errors_written": errors,
+        "seeds_dir": str(seeds_dir),
+        "errors_dir": str(errors_dir),
+        "out_root": str(out_root),
+    }
 
 
 def _run_z3_solver(*, constraints_smt2_b64: str | None, status: dict[str, Any]) -> dict[str, Any]:

@@ -307,6 +307,7 @@ def main(argv: list[str] | None = None) -> int:
     workspace_init_parser.add_argument("--source-dir", default=None)
     workspace_init_parser.add_argument("--klee-image", default=None)
     workspace_init_parser.add_argument("--build-container", default=None)
+    workspace_init_parser.add_argument("--mount", action="append", dest="extra_mounts", default=[], metavar="HOST=CONTAINER[:ro]")
     workspace_init_parser.add_argument("--copy", action="append", dest="copies", default=[], metavar="SRC=DEST_REL")
     target_select_parser = subcommands.add_parser("target-select")
     target_select_parser.add_argument("--sinks-jsonl", required=True)
@@ -337,10 +338,12 @@ def main(argv: list[str] | None = None) -> int:
     fuzz_ensemble.add_argument("--artifact-prefix", default=None)
     symbolic_worker = subcommands.add_parser("symbolic-worker-run")
     symbolic_worker.add_argument("run_id")
-    symbolic_worker.add_argument("--mode", choices=("symcc", "symqemu", "z3"), default="symcc")
+    symbolic_worker.add_argument("--mode", choices=("symcc", "symqemu", "z3", "klee"), default="symcc")
     symbolic_worker.add_argument("--command-json", default=None)
     symbolic_worker.add_argument("--constraints-smt2-b64", default=None)
     symbolic_worker.add_argument("--constraints-smt2-file", default=None)
+    symbolic_worker.add_argument("--klee-config", default=None)
+    symbolic_worker.add_argument("--workspace-root", default=None)
     symbolic_worker.add_argument("--timeout-seconds", type=float, default=60)
     symbolic_worker.add_argument("--artifact-prefix", default=None)
     sarif_reachability = subcommands.add_parser("sarif-reachability-run")
@@ -831,6 +834,7 @@ def main(argv: list[str] | None = None) -> int:
                 "source_dir": args.source_dir,
                 "klee_image": args.klee_image,
                 "build_container": args.build_container,
+                "extra_mounts": args.extra_mounts,
                 "copies": args.copies,
             },
         )
@@ -888,6 +892,8 @@ def main(argv: list[str] | None = None) -> int:
                 "mode": args.mode,
                 "command": _load_json_arg(args.command_json, None, default=None),
                 "constraints_smt2_b64": constraints_smt2_b64,
+                "klee_config": args.klee_config,
+                "workspace_root": args.workspace_root,
                 "timeout_seconds": args.timeout_seconds,
                 "artifact_prefix": args.artifact_prefix,
             },

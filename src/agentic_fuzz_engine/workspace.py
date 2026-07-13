@@ -78,6 +78,7 @@ def workspace_init(
     source_dir: str | Path | None = None,
     klee_image: str | None = None,
     build_container: str | None = None,
+    extra_mounts: list[str] | None = None,
     copies: list[str] | None = None,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -100,10 +101,19 @@ def workspace_init(
         if result.get("blocker"):
             blockers.append(result["blocker"])
 
+    parsed_mounts = []
+    for item in extra_mounts or []:
+        host_text, container_text = _parse_pair(item, kind="mount", separator="=")
+        mode = "rw"
+        if container_text.endswith(":ro") or container_text.endswith(":rw"):
+            container_text, mode = container_text[:-3], container_text[-2:]
+        parsed_mounts.append({"host": str(Path(host_text).expanduser()), "container": container_text, "mode": mode})
+
     config = {
         "path_maps": [{"host": host, "outer": outer} for host, outer in parsed_maps],
         "source_dir": resolved_source,
         "docker": {"klee_image": image, "build_container": build_container},
+        "extra_mounts": parsed_mounts,
         "layout": {name: name for name in WORKSPACE_SUBDIRS},
     }
     (workspace_root / WORKSPACE_CONFIG_NAME).write_text(
@@ -119,6 +129,7 @@ def workspace_init(
         "path_maps": config["path_maps"],
         "source_dir": resolved_source,
         "docker": config["docker"],
+        "extra_mounts": parsed_mounts,
         "copies": copy_results,
         "blockers": blockers,
     }

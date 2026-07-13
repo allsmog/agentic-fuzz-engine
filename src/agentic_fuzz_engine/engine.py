@@ -369,6 +369,7 @@ class AgenticFuzzEngine:
                     "source_dir": "string",
                     "klee_image": "string",
                     "build_container": "string",
+                    "extra_mounts": "array",
                     "copies": "array",
                 },
             ),
@@ -390,12 +391,14 @@ class AgenticFuzzEngine:
             ),
             _tool(
                 "symbolic_worker_run",
-                "Run a bounded real local SymCC, SymQEMU, or Z3 worker and collect generated inputs.",
+                "Run a bounded real local SymCC, SymQEMU, KLEE (containerized klee-ng), or Z3 worker and collect generated inputs.",
                 {
                     "run_id": "string",
                     "mode": "string",
                     "command": "array",
                     "constraints_smt2_b64": "string",
+                    "klee_config": "string",
+                    "workspace_root": "string",
                     "timeout_seconds": "number",
                     "artifact_prefix": "string",
                 },
@@ -1005,6 +1008,7 @@ class AgenticFuzzEngine:
             source_dir=args.get("source_dir") or None,
             klee_image=args.get("klee_image") or None,
             build_container=args.get("build_container") or None,
+            extra_mounts=_string_list(args.get("extra_mounts"), key="extra_mounts"),
             copies=_string_list(args.get("copies"), key="copies"),
         )
 
@@ -1054,6 +1058,8 @@ class AgenticFuzzEngine:
             mode=str(args.get("mode") or "symcc"),
             command=_optional_command(args.get("command")),
             constraints_smt2_b64=args.get("constraints_smt2_b64") if isinstance(args.get("constraints_smt2_b64"), str) else None,
+            klee_config=args.get("klee_config") if isinstance(args.get("klee_config"), str) else None,
+            workspace_root=args.get("workspace_root") or None,
             timeout_seconds=args.get("timeout_seconds", 60),
         )
         stored = self._store_runtime_output_files(

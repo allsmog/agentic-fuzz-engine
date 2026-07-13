@@ -123,6 +123,68 @@ class ContainerBuildTests(unittest.TestCase):
         self.assertEqual(result["artifacts"][0]["path"].rsplit("/", 1)[-1], "fuzzer")
 
 
+class KleeBackendTests(unittest.TestCase):
+    def test_extract_klee_tests_writes_seed_bytes_and_error_reports(self) -> None:
+        from agentic_fuzz_engine.runtime_backends import _extract_klee_tests
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            out_root = tmp_path / "klee-ng-out"
+            target_out = out_root / "smoke" / "h1-demo"
+            target_out.mkdir(parents=True)
+            (target_out / "test000001.json").write_text(
+                json.dumps(
+                    {
+                        "testId": 1,
+                        "error": {"type": "cwe78.err", "message": "boom"},
+                        "inputs": [{"name": "cmd", "size": 3, "data": [65, 66, 67]}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (target_out / "test000002.json").write_text(
+                json.dumps({"testId": 2, "inputs": [{"name": "cmd", "size": 2, "data": [1, 2]}]}),
+                encoding="utf-8",
+            )
+            output_dir = tmp_path / "outputs"
+
+            result = _extract_klee_tests(out_root, output_dir)
+
+            self.assertEqual(result["scanned"], 2)
+            self.assertEqual(result["seeds_written"], 2)
+            self.assertEqual(result["errors_written"], 1)
+            seed = output_dir / "seeds" / "smoke-h1-demo-test000001-cmd.bin"
+            self.assertEqual(seed.read_bytes(), b"ABC")
+            self.assertTrue((output_dir / "errors" / "smoke-h1-demo-test000001.json").is_file())
+
+    def test_klee_mode_reports_blockers_without_config_or_workspace(self) -> None:
+        from agentic_fuzz_engine.runtime_backends import run_symbolic_worker
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            fake_docker = bin_dir / "docker"
+            fake_docker.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n", encoding="utf-8")
+            fake_docker.chmod(0o755)
+            env = {"PATH": f"{bin_dir}:{os.environ.get('PATH', '')}"}
+
+            missing_config = run_symbolic_worker(work_dir=tmp_path / "w1", mode="klee", timeout_seconds=5, env=env)
+            self.assertFalse(missing_config["ok"])
+            self.assertIn("missing klee_config", missing_config["blockers"][0])
+
+            missing_workspace = run_symbolic_worker(
+                work_dir=tmp_path / "w2",
+                mode="klee",
+                klee_config="nope.ci.json",
+                workspace_root=tmp_path / "no-ws",
+                timeout_seconds=5,
+                env=env,
+            )
+            self.assertFalse(missing_workspace["ok"])
+            self.assertIn("workspace config not found", missing_workspace["blockers"][0])
+
+
 class ScaffoldTests(unittest.TestCase):
     def _write_sinks(self, path: Path) -> None:
         rows = [
