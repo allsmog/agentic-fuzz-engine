@@ -37,6 +37,7 @@ from .runtime_backends import (
     run_symbolic_worker,
     runtime_backend_status,
 )
+from .scaffold import scaffold_target, select_targets
 from .state import EngineState
 from .workspace import workspace_init
 from .export import (
@@ -344,6 +345,16 @@ class AgenticFuzzEngine:
             _tool("full_runtime_doctor", "Check owned full-runtime prerequisites for the complete local rebuild.", {}),
             _tool("runtime_backend_status", "Check real local backend availability for fuzzing, symbolic execution, SARIF reachability, and patch environments.", {}),
             _tool(
+                "target_select",
+                "Rank sink-inventory vectors against existing workspace targets so unharnessed attack surface is scaffolded first.",
+                {"sinks_jsonl": "string", "top": "integer", "workspace_root": "string"},
+            ),
+            _tool(
+                "target_scaffold",
+                "Generate a workspace target skeleton (project.yaml, .localfuzz config, build.json, harness skeleton, seeds, dictionary) from the sink inventory.",
+                {"name": "string", "sinks_jsonl": "string", "sink_tag": "string", "max_sink_refs": "integer", "force": "boolean", "workspace_root": "string"},
+            ),
+            _tool(
                 "workspace_init",
                 "Create or refresh the generated dot-directory workspace (reference-root layout, DooD path maps, docker images, env file, optional asset imports).",
                 {
@@ -545,6 +556,8 @@ class AgenticFuzzEngine:
             "full_runtime_doctor": self._full_runtime_doctor,
             "runtime_backend_status": self._runtime_backend_status,
             "workspace_init": self._workspace_init,
+            "target_select": self._target_select,
+            "target_scaffold": self._target_scaffold,
             "fuzz_ensemble_run": self._fuzz_ensemble_run,
             "symbolic_worker_run": self._symbolic_worker_run,
             "sarif_reachability_run": self._sarif_reachability_run,
@@ -952,6 +965,23 @@ class AgenticFuzzEngine:
 
     def _runtime_backend_status(self, args: dict[str, Any]) -> dict[str, Any]:
         return runtime_backend_status()
+
+    def _target_select(self, args: dict[str, Any]) -> dict[str, Any]:
+        return select_targets(
+            sinks_jsonl=_required(args, "sinks_jsonl"),
+            workspace_root=args.get("workspace_root") or None,
+            top=int(args.get("top", 25)),
+        )
+
+    def _target_scaffold(self, args: dict[str, Any]) -> dict[str, Any]:
+        return scaffold_target(
+            name=_required(args, "name"),
+            workspace_root=args.get("workspace_root") or None,
+            sinks_jsonl=args.get("sinks_jsonl") or None,
+            sink_tag=args.get("sink_tag") or None,
+            max_sink_refs=int(args.get("max_sink_refs", 20)),
+            force=bool(args.get("force", False)),
+        )
 
     def _workspace_init(self, args: dict[str, Any]) -> dict[str, Any]:
         return workspace_init(

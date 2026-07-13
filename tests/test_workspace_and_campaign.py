@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agentic_fuzz_engine.scaffold import scaffold_target, select_targets
 from agentic_fuzz_engine.workspace import (
     WORKSPACE_CONFIG_NAME,
     load_workspace,
@@ -85,6 +86,62 @@ class WorkspaceTests(unittest.TestCase):
         )
         self.assertEqual(translate_host_path("/home/user/notes", workspace), "/mnt/outer/home/notes")
         self.assertEqual(translate_host_path("/srv/other", workspace), "/srv/other")
+
+
+class ScaffoldTests(unittest.TestCase):
+    def _write_sinks(self, path: Path) -> None:
+        rows = [
+            {"tag": "exec-L0", "file": "a.cpp", "line": 10, "method": "Run", "callee": "system", "code": "system(x)"},
+            {"tag": "exec-L0", "file": "b.cpp", "line": 20, "method": "Go", "callee": "popen", "code": "popen(y)"},
+            {"tag": "mem-parse", "file": "c.cpp", "line": 30, "method": "Parse", "callee": "memcpy", "code": "memcpy(d, s, n)"},
+        ]
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    def test_select_targets_ranks_unharnessed_vectors_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            sinks = tmp_path / "sinks.jsonl"
+            self._write_sinks(sinks)
+            (tmp_path / "ws" / "targets" / "c" / "mem_parse").mkdir(parents=True)
+            (tmp_path / "ws" / "targets" / "c" / "_legacy").mkdir(parents=True)
+
+            result = select_targets(sinks_jsonl=sinks, workspace_root=tmp_path / "ws", env={})
+
+        self.assertEqual(result["existing_targets"], ["mem_parse"])
+        self.assertEqual(result["unharnessed"], ["exec_l0"])
+        first = result["vectors"][0]
+        self.assertEqual(first["suggested_name"], "exec_l0")
+        self.assertEqual(first["sink_count"], 2)
+        self.assertFalse(first["harnessed"])
+
+    def test_scaffold_target_generates_profile_config_build_and_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            sinks = tmp_path / "sinks.jsonl"
+            self._write_sinks(sinks)
+            ws = tmp_path / "ws"
+
+            result = scaffold_target(name="exec_l0", workspace_root=ws, sinks_jsonl=sinks, sink_tag="exec-L0", env={})
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["sink_refs"], 2)
+            target_dir = ws / "targets" / "c" / "exec_l0"
+            config_text = (target_dir / ".localfuzz" / "config.yaml").read_text(encoding="utf-8")
+            self.assertIn("- name: exec_l0", config_text)
+            harness_text = (target_dir / "harness.cpp").read_text(encoding="utf-8")
+            self.assertIn("TODO(human)", harness_text)
+            self.assertIn("a.cpp:10", harness_text)
+            self.assertIn("FUZZ_MAIN", harness_text)
+            build = json.loads((target_dir / ".localfuzz" / "build.json").read_text(encoding="utf-8"))
+            self.assertEqual([step["name"] for step in build["steps"]], ["libfuzzer", "symcc"])
+            self.assertTrue((ws / "benchmark" / "projects" / "exec_l0" / "project.yaml").is_file())
+
+            with self.assertRaises(FileExistsError):
+                scaffold_target(name="exec_l0", workspace_root=ws, env={})
+
+    def test_scaffold_target_rejects_bad_names(self) -> None:
+        with self.assertRaises(ValueError):
+            scaffold_target(name="Bad Name", workspace_root="/tmp/nowhere", env={})
 
 
 if __name__ == "__main__":

@@ -308,6 +308,17 @@ def main(argv: list[str] | None = None) -> int:
     workspace_init_parser.add_argument("--klee-image", default=None)
     workspace_init_parser.add_argument("--build-container", default=None)
     workspace_init_parser.add_argument("--copy", action="append", dest="copies", default=[], metavar="SRC=DEST_REL")
+    target_select_parser = subcommands.add_parser("target-select")
+    target_select_parser.add_argument("--sinks-jsonl", required=True)
+    target_select_parser.add_argument("--top", type=int, default=25)
+    target_select_parser.add_argument("--workspace-root", default=None)
+    target_scaffold_parser = subcommands.add_parser("target-scaffold")
+    target_scaffold_parser.add_argument("name")
+    target_scaffold_parser.add_argument("--sinks-jsonl", default=None)
+    target_scaffold_parser.add_argument("--sink-tag", default=None)
+    target_scaffold_parser.add_argument("--max-sink-refs", type=int, default=20)
+    target_scaffold_parser.add_argument("--force", action="store_true")
+    target_scaffold_parser.add_argument("--workspace-root", default=None)
     fuzz_ensemble = subcommands.add_parser("fuzz-ensemble-run")
     fuzz_ensemble.add_argument("run_id")
     fuzz_ensemble.add_argument("--target", required=True)
@@ -816,6 +827,23 @@ def main(argv: list[str] | None = None) -> int:
                 "klee_image": args.klee_image,
                 "build_container": args.build_container,
                 "copies": args.copies,
+            },
+        )
+    elif args.command == "target-select":
+        payload = engine.call_tool(
+            "target_select",
+            {"sinks_jsonl": args.sinks_jsonl, "top": args.top, "workspace_root": args.workspace_root},
+        )
+    elif args.command == "target-scaffold":
+        payload = engine.call_tool(
+            "target_scaffold",
+            {
+                "name": args.name,
+                "sinks_jsonl": args.sinks_jsonl,
+                "sink_tag": args.sink_tag,
+                "max_sink_refs": args.max_sink_refs,
+                "force": args.force,
+                "workspace_root": args.workspace_root,
             },
         )
     elif args.command == "fuzz-ensemble-run":
