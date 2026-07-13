@@ -23,7 +23,7 @@ from .full_campaign import run_owned_local_full_campaign
 from .grading import grade_finding_artifact
 from .grammar import infer_grammar_from_source
 from .guardrails import audit_runtime_guard_runtime_calls
-from .harness_gen import generate_target
+from .harness_gen import generate_all, generate_target
 from .minimization import minimize_pov_artifact
 from .owned_replay import run_owned_direct_asan_replay
 from .oss_fuzz_build import run_owned_oss_fuzz_build, run_owned_oss_fuzz_build_replay
@@ -367,6 +367,8 @@ class AgenticFuzzEngine:
                     "sinks_jsonl": "string",
                     "sink_tag": "string",
                     "validate": "boolean",
+                    "all": "boolean",
+                    "max_targets": "integer",
                     "workspace_root": "string",
                 },
             ),
@@ -1071,6 +1073,15 @@ class AgenticFuzzEngine:
         )
 
     def _target_generate(self, args: dict[str, Any]) -> dict[str, Any]:
+        if bool(args.get("all", False)):
+            return generate_all(
+                spec=_required(args, "spec"),
+                sinks_jsonl=_required(args, "sinks_jsonl"),
+                workspace_root=args.get("workspace_root") or None,
+                max_targets=int(args.get("max_targets", 10)),
+                validate=bool(args.get("validate", False)),
+                engine=self,
+            )
         return generate_target(
             name=_required(args, "name"),
             spec=_required(args, "spec"),

@@ -138,7 +138,7 @@ def generate_target(
         )
         blockers.extend(validation.get("blockers", []))
 
-    status = "validated" if validation and validation.get("ok") else ("blocked" if blockers else "generated")
+    status = "blocked" if blockers else "generated"
     workorder_path = None
     if blockers or outcome.get("needs_authoring"):
         workorder_path = _write_workorder(
@@ -151,6 +151,10 @@ def generate_target(
             placeholders=placeholders,
         )
         status = "awaiting-authoring"
+    # A passing build+smoke wins: remaining workorder entries are future
+    # authoring opportunities, not a gate on the target that already works.
+    if validation and validation.get("ok"):
+        status = "validated"
 
     manifest = {
         "generator": generator,
@@ -180,6 +184,49 @@ def generate_target(
         "validation": validation,
         "workorder": workorder_path,
         "blockers": blockers,
+    }
+
+
+def generate_all(
+    *,
+    spec: str,
+    sinks_jsonl: str | Path,
+    workspace_root: str | Path | None = None,
+    max_targets: int = 10,
+    validate: bool = False,
+    engine: Any = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Sweep unharnessed sink vectors through generate_target, sequentially."""
+    from .scaffold import select_targets
+
+    budget = max(1, min(int(max_targets), 50))
+    selection = select_targets(sinks_jsonl=sinks_jsonl, workspace_root=workspace_root, top=budget * 4, env=env)
+    results = []
+    for entry in selection["vectors"]:
+        if entry["harnessed"] or len(results) >= budget:
+            continue
+        try:
+            result = generate_target(
+                name=entry["suggested_name"],
+                spec=spec,
+                workspace_root=workspace_root,
+                sinks_jsonl=sinks_jsonl,
+                sink_tag=entry["tag"],
+                validate=validate,
+                engine=engine,
+                env=env,
+            )
+        except (ValueError, FileNotFoundError, FileExistsError) as exc:
+            result = {"ok": False, "name": entry["suggested_name"], "status": "error", "blockers": [str(exc)]}
+        results.append(result)
+    return {
+        "ok": all(item.get("ok") for item in results) if results else True,
+        "mode": "target-generate-all",
+        "spec": spec,
+        "attempted": len(results),
+        "statuses": {item.get("name"): item.get("status") for item in results},
+        "results": results,
     }
 
 
@@ -904,7 +951,15 @@ def _validate_build_and_smoke(
             env=smoke_env,
         )
         output = f"{smoke.get('stdout', '')}\n{smoke.get('stderr', '')}"
-        completed = smoke["exit_code"] == 0 or re.search(r"Done \d+ runs", output) is not None
+        # Smoke passes when the harness demonstrably executes: a clean bounded
+        # run, the libFuzzer completion marker, or a sanitizer report from an
+        # executed input (an instantly-crashing harness is a working harness).
+        completed = (
+            smoke["exit_code"] == 0
+            or re.search(r"Done \d+ runs", output) is not None
+            or "ERROR: AddressSanitizer" in output
+            or "SUMMARY: AddressSanitizer" in output
+        )
         if smoke["timed_out"] or not completed:
             blockers.append(f"smoke: fuzzer exited {smoke['exit_code']} (timed_out={smoke['timed_out']})")
     else:

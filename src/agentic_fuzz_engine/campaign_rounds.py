@@ -15,6 +15,7 @@ it, so progress accumulates across rounds and across campaigns.
 
 from __future__ import annotations
 
+import json
 import os
 from hashlib import sha256
 from pathlib import Path
@@ -75,6 +76,19 @@ def run_campaign_rounds(
     blockers: list[str] = []
     if not fuzzer.is_file() or not os.access(fuzzer, os.X_OK):
         blockers.append(f"missing ASAN fuzzer binary (run target-build first): {fuzzer}")
+    # Generated targets must pass build+smoke validation before consuming
+    # campaign budget — an unvalidated generated stub fuzzes nothing.
+    manifest_path = root / "targets" / "c" / name / ".localfuzz" / "generate.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            manifest = {}
+        if not manifest.get("validated"):
+            blockers.append(
+                f"generated target not validated (status={manifest.get('status')!r}); "
+                "run target-generate --validate first"
+            )
     round_budget = max(1, min(int(rounds), MAX_ROUNDS))
 
     start = engine.call_tool(

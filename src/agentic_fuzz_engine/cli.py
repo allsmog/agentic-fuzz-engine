@@ -321,11 +321,13 @@ def main(argv: list[str] | None = None) -> int:
     target_scaffold_parser.add_argument("--force", action="store_true")
     target_scaffold_parser.add_argument("--workspace-root", default=None)
     target_generate_parser = subcommands.add_parser("target-generate")
-    target_generate_parser.add_argument("name")
+    target_generate_parser.add_argument("name", nargs="?", default=None)
     target_generate_parser.add_argument("--spec", required=True)
     target_generate_parser.add_argument("--sinks-jsonl", default=None)
     target_generate_parser.add_argument("--sink-tag", default=None)
     target_generate_parser.add_argument("--validate", action="store_true")
+    target_generate_parser.add_argument("--all", action="store_true", dest="generate_all")
+    target_generate_parser.add_argument("--max-targets", type=int, default=10)
     target_generate_parser.add_argument("--workspace-root", default=None)
     target_build_parser = subcommands.add_parser("target-build")
     target_build_parser.add_argument("project")
@@ -894,6 +896,8 @@ def main(argv: list[str] | None = None) -> int:
                 "sinks_jsonl": args.sinks_jsonl,
                 "sink_tag": args.sink_tag,
                 "validate": args.validate,
+                "all": args.generate_all,
+                "max_targets": args.max_targets,
                 "workspace_root": args.workspace_root,
             },
         )

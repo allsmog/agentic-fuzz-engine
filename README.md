@@ -191,6 +191,16 @@ cli target-select --sinks-jsonl sinks.jsonl
 cli target-scaffold <vector> --sinks-jsonl sinks.jsonl
 cli target-build localfuzz/c/<vector>
 
+# or generate targets automatically from a workspace generator spec:
+#   type_enum        enumerate serializable types -> selector-dispatch harness
+#   direct_call      signature-extract sink functions -> direct-call harness
+#   symbolic_string  KLEE mini-harnesses + generated ci tier
+# anything a generator cannot produce becomes .localfuzz/workorder.json for a
+# human/LLM author; the same build+smoke loop then validates the authored file
+# (authored files are never overwritten by regeneration).
+cli target-generate <vector> --spec <spec> --sinks-jsonl sinks.jsonl --validate
+cli target-generate --all --spec <spec> --sinks-jsonl sinks.jsonl --max-targets 10
+
 # bounded, resource-guarded campaign rounds
 cli campaign-round-run localfuzz/c/<vector> --rounds 4 --klee-config tier.ci.json
 ```
@@ -199,7 +209,9 @@ Every lane is bounded and sequential: libFuzzer runs with an explicit RSS
 limit and `-max_total_time`, the SymCC corpus sync runs one input at a time
 under a `prlimit` address-space cap, and the KLEE lane runs inside a
 container with `--memory`, `--pids-limit`, and `--cpus` limits. A
-disk-headroom guard aborts work before a volume fills.
+disk-headroom guard aborts work before a volume fills. Generated targets are
+gated: `campaign-round-run` refuses a target whose `generate.json` has not
+passed build+smoke validation.
 
 ## Agent Roles
 

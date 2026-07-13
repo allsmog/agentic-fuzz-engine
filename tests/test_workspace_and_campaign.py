@@ -329,6 +329,31 @@ class CampaignRoundsTests(unittest.TestCase):
         self.assertIn("skipped", round_one["symcc_sync"])
         self.assertEqual(round_one["intake"]["findings_recorded"], 1)
 
+    def test_round_run_blocks_unvalidated_generated_target(self) -> None:
+        from agentic_fuzz_engine.campaign_rounds import run_campaign_rounds
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp) / "ws"
+            bin_dir = ws / "bin" / "gen"
+            bin_dir.mkdir(parents=True)
+            fuzzer = bin_dir / "fuzzer"
+            fuzzer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fuzzer.chmod(0o755)
+            manifest_dir = ws / "targets" / "c" / "gen" / ".localfuzz"
+            manifest_dir.mkdir(parents=True)
+            (manifest_dir / "generate.json").write_text(
+                json.dumps({"status": "awaiting-authoring", "validated": False}), encoding="utf-8"
+            )
+            engine = _StubEngine(Path(tmp))
+
+            result = run_campaign_rounds(
+                engine, project="localfuzz/c/gen", workspace_root=ws, env=dict(os.environ)
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("not validated", result["blockers"][0])
+        self.assertEqual(result["rounds_completed"], 0)
+
     def test_round_run_blocks_without_fuzzer_binary(self) -> None:
         from agentic_fuzz_engine.campaign_rounds import run_campaign_rounds
 
