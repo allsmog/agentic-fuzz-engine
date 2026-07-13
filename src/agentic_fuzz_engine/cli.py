@@ -301,6 +301,13 @@ def main(argv: list[str] | None = None) -> int:
     runtime_doctor.add_argument("--strict", action="store_true")
     runtime_backend_status = subcommands.add_parser("runtime-backend-status")
     runtime_backend_status.add_argument("--strict", action="store_true")
+    workspace_init_parser = subcommands.add_parser("workspace-init")
+    workspace_init_parser.add_argument("--root", default=None)
+    workspace_init_parser.add_argument("--map", action="append", dest="path_maps", default=[], metavar="HOST=OUTER")
+    workspace_init_parser.add_argument("--source-dir", default=None)
+    workspace_init_parser.add_argument("--klee-image", default=None)
+    workspace_init_parser.add_argument("--build-container", default=None)
+    workspace_init_parser.add_argument("--copy", action="append", dest="copies", default=[], metavar="SRC=DEST_REL")
     fuzz_ensemble = subcommands.add_parser("fuzz-ensemble-run")
     fuzz_ensemble.add_argument("run_id")
     fuzz_ensemble.add_argument("--target", required=True)
@@ -799,6 +806,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.strict and not payload.get("ok"):
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 1
+    elif args.command == "workspace-init":
+        payload = engine.call_tool(
+            "workspace_init",
+            {
+                "root": args.root,
+                "path_maps": args.path_maps,
+                "source_dir": args.source_dir,
+                "klee_image": args.klee_image,
+                "build_container": args.build_container,
+                "copies": args.copies,
+            },
+        )
     elif args.command == "fuzz-ensemble-run":
         payload = engine.call_tool(
             "fuzz_ensemble_run",

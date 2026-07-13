@@ -38,6 +38,7 @@ from .runtime_backends import (
     runtime_backend_status,
 )
 from .state import EngineState
+from .workspace import workspace_init
 from .export import (
     audit_subagent_orchestration,
     audit_export_completion,
@@ -343,6 +344,18 @@ class AgenticFuzzEngine:
             _tool("full_runtime_doctor", "Check owned full-runtime prerequisites for the complete local rebuild.", {}),
             _tool("runtime_backend_status", "Check real local backend availability for fuzzing, symbolic execution, SARIF reachability, and patch environments.", {}),
             _tool(
+                "workspace_init",
+                "Create or refresh the generated dot-directory workspace (reference-root layout, DooD path maps, docker images, env file, optional asset imports).",
+                {
+                    "root": "string",
+                    "path_maps": "array",
+                    "source_dir": "string",
+                    "klee_image": "string",
+                    "build_container": "string",
+                    "copies": "array",
+                },
+            ),
+            _tool(
                 "fuzz_ensemble_run",
                 "Run bounded real local libFuzzer, AFL++, and/or LibAFL workers against explicit harness commands.",
                 {
@@ -531,6 +544,7 @@ class AgenticFuzzEngine:
             "engine_parity_audit": self._engine_parity_audit,
             "full_runtime_doctor": self._full_runtime_doctor,
             "runtime_backend_status": self._runtime_backend_status,
+            "workspace_init": self._workspace_init,
             "fuzz_ensemble_run": self._fuzz_ensemble_run,
             "symbolic_worker_run": self._symbolic_worker_run,
             "sarif_reachability_run": self._sarif_reachability_run,
@@ -938,6 +952,16 @@ class AgenticFuzzEngine:
 
     def _runtime_backend_status(self, args: dict[str, Any]) -> dict[str, Any]:
         return runtime_backend_status()
+
+    def _workspace_init(self, args: dict[str, Any]) -> dict[str, Any]:
+        return workspace_init(
+            root=args.get("root") or None,
+            path_maps=_string_list(args.get("path_maps"), key="path_maps"),
+            source_dir=args.get("source_dir") or None,
+            klee_image=args.get("klee_image") or None,
+            build_container=args.get("build_container") or None,
+            copies=_string_list(args.get("copies"), key="copies"),
+        )
 
     def _fuzz_ensemble_run(self, args: dict[str, Any]) -> dict[str, Any]:
         run_id = _required(args, "run_id")
