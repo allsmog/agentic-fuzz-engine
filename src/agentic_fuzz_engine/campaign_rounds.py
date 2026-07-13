@@ -28,6 +28,14 @@ MAX_ROUNDS = 100
 MAX_KLEE_SEED_MERGE = 500
 
 
+def default_asan_options(workspace_root: Path) -> str:
+    options = "detect_leaks=0:allocator_may_return_null=1:symbolize=0"
+    suppressions = workspace_root / "asan.supp"
+    if suppressions.is_file():
+        options += f":suppressions={suppressions}:print_suppressions=0"
+    return options
+
+
 def run_campaign_rounds(
     engine: Any,
     *,
@@ -48,6 +56,14 @@ def run_campaign_rounds(
 ) -> dict[str, Any]:
     environment = dict(os.environ if env is None else env)
     root = resolve_workspace_root(workspace_root, env=environment)
+    # Fuzz binaries link uninstrumented dependency .so's whose static-init
+    # allocations LSan reports (and whose exit-time suppression pass can wedge
+    # on the symbolizer pipe). Memory corruption, not leaks, is the campaign
+    # target — disable leak checking for every child this run spawns, and honor
+    # an optional workspace-level ASAN suppression file for known vendor noise.
+    asan_options = default_asan_options(root)
+    os.environ.setdefault("ASAN_OPTIONS", asan_options)
+    environment.setdefault("ASAN_OPTIONS", asan_options)
     name = project.removeprefix("localfuzz/c/")
     target = f"localfuzz/c/{name}"
 
@@ -96,6 +112,7 @@ def run_campaign_rounds(
                     str(corpus),
                     f"-rss_limit_mb={int(rss_limit_mb)}",
                     f"-max_total_time={max(1, int(fuzz_seconds))}",
+                    "-detect_leaks=0",
                     "-print_final_stats=1",
                 ],
                 "workers": ["libfuzzer"],

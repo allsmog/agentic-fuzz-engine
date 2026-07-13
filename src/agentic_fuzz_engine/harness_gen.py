@@ -832,13 +832,24 @@ def _validate_build_and_smoke(
     fuzzer = bin_dir / "fuzzer"
     smoke: dict[str, Any] | None = None
     if fuzzer.is_file() and os.access(fuzzer, os.X_OK):
+        from .campaign_rounds import default_asan_options
+
+        smoke_env = dict(environment)
+        # Uninstrumented dependency .so's leak at static init and can fault in
+        # exit-time destructors; ASAN's symbolizer can also wedge on its pipe
+        # for very large link sets. Keep the smoke about one question only —
+        # does the harness initialize and execute inputs — so: no leak check,
+        # no symbolization, and pass on the completion marker.
+        smoke_env.setdefault("ASAN_OPTIONS", default_asan_options(root))
         smoke = _run_command(
-            [str(fuzzer), "-runs=16", "-rss_limit_mb=2048"],
+            [str(fuzzer), "-runs=16", "-rss_limit_mb=2048", "-detect_leaks=0"],
             cwd=bin_dir,
             timeout_seconds=SMOKE_TIMEOUT_SECONDS,
-            env=environment,
+            env=smoke_env,
         )
-        if smoke["exit_code"] != 0 or smoke["timed_out"]:
+        output = f"{smoke.get('stdout', '')}\n{smoke.get('stderr', '')}"
+        completed = smoke["exit_code"] == 0 or re.search(r"Done \d+ runs", output) is not None
+        if smoke["timed_out"] or not completed:
             blockers.append(f"smoke: fuzzer exited {smoke['exit_code']} (timed_out={smoke['timed_out']})")
     else:
         blockers.append(f"smoke: no fuzzer binary at {fuzzer}")
