@@ -135,9 +135,14 @@ def run_campaign_rounds(
                 "artifact_prefix": f"rounds/{index}/crashes",
             },
         )
+        libfuzzer_stats = None
+        for worker in fuzz.get("worker_results", []):
+            if worker.get("worker") == "libfuzzer":
+                libfuzzer_stats = (worker.get("run") or {}).get("parsed")
         summary["fuzz"] = {
             "ok": fuzz.get("ok"),
             "crash_files": len(fuzz.get("crash_files", [])),
+            "stats": libfuzzer_stats,
             "blockers": fuzz.get("blockers", []),
         }
 
@@ -231,9 +236,18 @@ def run_campaign_rounds(
                 "next_command": "campaign-round-run" if index < round_budget else "campaign-report",
             },
         )
+        _append_round_metrics(root / "work" / name / "rounds.jsonl", run_id=active_run_id, summary=summary)
         round_summaries.append(summary)
 
     return _summary(active_run_id, target, rounds_done=round_summaries, corpus=corpus, blockers=blockers)
+
+
+def _append_round_metrics(path: Path, *, run_id: str, summary: dict[str, Any]) -> None:
+    """Durable per-round metrics line — the plateau signal's source of truth."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {"run_id": run_id, **summary}
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 
 def _merge_seeds(seeds_dir: Path, corpus: Path, *, prefix: str) -> int:

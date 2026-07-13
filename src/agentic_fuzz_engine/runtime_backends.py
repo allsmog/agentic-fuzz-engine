@@ -4,6 +4,7 @@ import base64
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 from hashlib import sha256
@@ -446,7 +447,13 @@ def _run_libfuzzer(
         materialized.append(f"-runs={run_count}")
     if not any(arg.startswith("-artifact_prefix=") for arg in materialized):
         materialized.append(f"-artifact_prefix={crash_dir}{os.sep}")
-    run = _run_command(materialized, cwd=crash_dir.parent, timeout_seconds=timeout_seconds, env=env)
+    run = _run_command(
+        materialized,
+        cwd=crash_dir.parent,
+        timeout_seconds=timeout_seconds,
+        env=env,
+        raw_output_parser=parse_libfuzzer_stats,
+    )
     return {"worker": "libfuzzer", "executed": True, "crash_dir": str(crash_dir), "run": run, "blockers": [] if not run["timed_out"] else ["timeout"]}
 
 
@@ -910,7 +917,32 @@ def _replace_placeholders(argv: list[str], values: dict[str, str]) -> list[str]:
     return replaced
 
 
-def _run_command(command: list[str], *, cwd: Path, timeout_seconds: float, env: Mapping[str, str]) -> dict[str, Any]:
+def parse_libfuzzer_stats(output: str) -> dict[str, Any] | None:
+    """Extract coverage stats from raw libFuzzer output (pre-clipping).
+
+    Uses the last status/DONE line (``#N ... cov: X ft: Y ... corp: Z``) and
+    the ``stat::`` block from ``-print_final_stats=1`` when present.
+    """
+    stats: dict[str, Any] = {}
+    status_line = re.compile(r"#(\d+)\s+\S+\s+cov: (\d+) ft: (\d+) corp: (\d+)")
+    for match in status_line.finditer(output):
+        stats["execs"] = int(match.group(1))
+        stats["covered_pcs"] = int(match.group(2))
+        stats["features"] = int(match.group(3))
+        stats["corpus_units"] = int(match.group(4))
+    for match in re.finditer(r"stat::([a-z_]+):\s+(\d+)", output):
+        stats[f"stat_{match.group(1)}"] = int(match.group(2))
+    return stats or None
+
+
+def _run_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout_seconds: float,
+    env: Mapping[str, str],
+    raw_output_parser: Any = None,
+) -> dict[str, Any]:
     argv = _runtime_command(command)
     started = monotonic()
     try:
@@ -925,8 +957,15 @@ def _run_command(command: list[str], *, cwd: Path, timeout_seconds: float, env: 
             timeout=timeout_seconds,
             check=False,
         )
+        parsed = None
+        if raw_output_parser is not None:
+            try:
+                parsed = raw_output_parser(f"{proc.stdout or ''}\n{proc.stderr or ''}")
+            except Exception:  # noqa: BLE001 - parser failures must not mask the run
+                parsed = None
         return {
             "command": argv,
+            "parsed": parsed,
             "exit_code": proc.returncode,
             "timed_out": False,
             "elapsed_ms": int((monotonic() - started) * 1000),
