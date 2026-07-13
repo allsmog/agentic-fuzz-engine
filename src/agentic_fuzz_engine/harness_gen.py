@@ -307,6 +307,13 @@ def _generate_direct_call(
         if extraction is None:
             skipped.append({"method": key[1], "file": key[0], "reason": "signature not found"})
             continue
+        if _tu_defines_main(source_path):
+            skipped.append(
+                {"method": key[1], "file": key[0],
+                 "reason": "translation unit defines main() (standalone tool; needs authored replica)",
+                 "signature": extraction["signature"]}
+            )
+            continue
         shape = _classify_fuzzable(extraction)
         if shape is None:
             skipped.append(
@@ -595,15 +602,23 @@ def _extract_with_tree_sitter(text: str, method: str, line_hint: Any) -> dict[st
         if ancestor.type in {"class_specifier", "struct_specifier"}:
             is_class_method = True
         ancestor = ancestor.parent
+    bare_name = name_text.split("::")[-1]
     if "::" in name_text:
-        qualifier = name_text.rsplit("::", 1)[0]
-        if re.search(rf"\b(class|struct)\s+{re.escape(qualifier.split('::')[-1])}\b", text):
+        # Out-of-line member definitions carry the class in the declarator
+        # while the class keyword usually lives in a header we cannot see.
+        # Only treat a qualifier component as a namespace when the file
+        # proves it is one; anything unproven is class scope. A qualifier
+        # ending in the function's own name is a constructor.
+        qualifier_parts = name_text.split("::")[:-1]
+        if qualifier_parts and qualifier_parts[-1] == bare_name:
             is_class_method = True
+        elif all(re.search(rf"\bnamespace\s+{re.escape(part)}\b", text) for part in qualifier_parts):
+            namespaces.extend(qualifier_parts)
         else:
-            namespaces.extend(qualifier.split("::"))
+            is_class_method = True
 
     params = _parse_params(params_text)
-    bare = name_text.split("::")[-1]
+    bare = bare_name
     qualified = "::".join([*namespaces, bare]) if namespaces else bare
     return {
         "name": bare,
@@ -650,9 +665,12 @@ def _extract_with_regex(text: str, method: str) -> dict[str, Any] | None:
         if returns in {"if", "while", "for", "switch", "return", "else"}:
             continue
         qualifier = match.group(2).rstrip(":")
-        is_class_method = bool(
-            qualifier and re.search(rf"\b(class|struct)\s+{re.escape(qualifier.split('::')[-1])}\b", text)
+        qualifier_parts = qualifier.split("::") if qualifier else []
+        is_class_method = bool(qualifier_parts) and not all(
+            re.search(rf"\bnamespace\s+{re.escape(part)}\b", text) for part in qualifier_parts
         )
+        if qualifier_parts and qualifier_parts[-1] == method:
+            is_class_method = True  # constructor
         line = text[: match.start()].count("\n") + 1
         prefix_line = text.splitlines()[line - 1] if line - 1 < len(text.splitlines()) else ""
         return {
@@ -719,6 +737,14 @@ def _parse_params(params_text: str) -> list[dict[str, str]]:
     return params
 
 
+def _tu_defines_main(source_path: Path) -> bool:
+    try:
+        text = source_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return bool(re.search(r"^\s*int\s+main\s*\(", text, re.MULTILINE))
+
+
 def _classify_fuzzable(extraction: dict[str, Any]) -> str | None:
     params = extraction["params"]
     if len(params) == 2 and _is_byteptr(params[0]["type"]) and _is_integral(params[1]["type"]):
@@ -737,7 +763,13 @@ def _is_integral(type_text: str) -> bool:
 
 
 def _is_stringish(type_text: str) -> bool:
-    return bool(re.search(r"(std::)?string|StringPiece", type_text)) and "*" not in type_text
+    # Plain string-like values only — a string inside a template container
+    # (vector<string>, map<...>) is not directly constructible from raw bytes.
+    return (
+        bool(re.search(r"(std::)?string|StringPiece", type_text))
+        and "*" not in type_text
+        and "<" not in type_text
+    )
 
 
 def _render_prototype(extraction: dict[str, Any]) -> str:
