@@ -458,6 +458,7 @@ def _run_afl(
     afl_env.setdefault("AFL_NO_UI", "1")
     afl_env.setdefault("AFL_SKIP_CPUFREQ", "1")
     afl_env.setdefault("AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES", "1")
+    afl_env.setdefault("AFL_AUTORESUME", "1")
     afl_timeout = max(1, int(timeout_seconds))
     argv = [
         status["afl-fuzz"]["path"] or "afl-fuzz",

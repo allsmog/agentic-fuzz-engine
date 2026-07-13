@@ -252,6 +252,32 @@ class AgenticFuzzFullRuntimeTests(unittest.TestCase):
         self.assertEqual(result["workers_executed"], 3)
         self.assertGreaterEqual(len(result["crash_files"]), 3)
 
+    def test_afl_worker_defaults_to_autoresume_for_repeat_rounds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            _write_fake_executable(bin_dir / "clang")
+            _write_fake_env_dump_afl_fuzz(bin_dir / "afl-fuzz")
+            env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+            result = run_fuzz_ensemble(
+                work_dir=tmp_path / "work",
+                target="localfuzz/c/tiny",
+                harness="fuzz",
+                harness_command=["/bin/true", "{poc}"],
+                workers=["afl"],
+                runs=2,
+                timeout_seconds=5,
+                env=env,
+            )
+
+            afl_result = result["worker_results"][0]
+            self.assertTrue(afl_result["executed"])
+            env_dump = Path(afl_result["crash_dir"]) / "env.json"
+            recorded = json.loads(env_dump.read_text(encoding="utf-8"))
+        self.assertEqual(recorded.get("AFL_AUTORESUME"), "1")
+
     def test_symbolic_worker_runs_bounded_fake_symcc_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -905,6 +931,25 @@ def _write_fake_afl_fuzz(path: Path) -> None:
                 "crashes = out / 'default' / 'crashes'",
                 "crashes.mkdir(parents=True, exist_ok=True)",
                 "(crashes / 'id:000000,sig:06,src:000000').write_bytes(b'afl-crash')",
+                "raise SystemExit(0)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _write_fake_env_dump_afl_fuzz(path: Path) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import json, os, pathlib, sys",
+                "out = pathlib.Path(sys.argv[sys.argv.index('-o') + 1])",
+                "out.mkdir(parents=True, exist_ok=True)",
+                "keys = ('AFL_AUTORESUME', 'AFL_NO_UI')",
+                "(out / 'env.json').write_text(json.dumps({k: os.environ.get(k) for k in keys}))",
                 "raise SystemExit(0)",
             ]
         )
