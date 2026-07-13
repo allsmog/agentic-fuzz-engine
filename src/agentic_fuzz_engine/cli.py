@@ -325,6 +325,20 @@ def main(argv: list[str] | None = None) -> int:
     target_build_parser.add_argument("--only-step", action="append", dest="only_steps", default=[])
     target_build_parser.add_argument("--timeout-seconds", type=float, default=900)
     target_build_parser.add_argument("--workspace-root", default=None)
+    round_run_parser = subcommands.add_parser("campaign-round-run")
+    round_run_parser.add_argument("project")
+    round_run_parser.add_argument("--run-id", default=None)
+    round_run_parser.add_argument("--rounds", type=int, default=1)
+    round_run_parser.add_argument("--fuzz-seconds", type=float, default=600)
+    round_run_parser.add_argument("--rss-limit-mb", type=int, default=2048)
+    round_run_parser.add_argument("--sync-max-inputs", type=int, default=32)
+    round_run_parser.add_argument("--sync-seconds", type=float, default=600)
+    round_run_parser.add_argument("--sync-memory-mb", type=int, default=4096)
+    round_run_parser.add_argument("--klee-config", default=None)
+    round_run_parser.add_argument("--klee-every", type=int, default=4)
+    round_run_parser.add_argument("--klee-seconds", type=float, default=900)
+    round_run_parser.add_argument("--workspace-root", default=None)
+    round_run_parser.add_argument("--min-free-gb", type=float, default=10.0)
     corpus_sync_parser = subcommands.add_parser("symbolic-corpus-sync")
     corpus_sync_parser.add_argument("--corpus-dir", required=True)
     corpus_sync_parser.add_argument("--symcc-binary", required=True)
@@ -872,6 +886,25 @@ def main(argv: list[str] | None = None) -> int:
                 "only_steps": args.only_steps,
                 "timeout_seconds": args.timeout_seconds,
                 "workspace_root": args.workspace_root,
+            },
+        )
+    elif args.command == "campaign-round-run":
+        payload = engine.call_tool(
+            "campaign_round_run",
+            {
+                "project": args.project,
+                "run_id": args.run_id,
+                "rounds": args.rounds,
+                "fuzz_seconds": args.fuzz_seconds,
+                "rss_limit_mb": args.rss_limit_mb,
+                "sync_max_inputs": args.sync_max_inputs,
+                "sync_seconds": args.sync_seconds,
+                "sync_memory_mb": args.sync_memory_mb,
+                "klee_config": args.klee_config,
+                "klee_every": args.klee_every,
+                "klee_seconds": args.klee_seconds,
+                "workspace_root": args.workspace_root,
+                "min_free_gb": args.min_free_gb,
             },
         )
     elif args.command == "symbolic-corpus-sync":

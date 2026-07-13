@@ -37,6 +37,7 @@ from .runtime_backends import (
     run_symbolic_worker,
     runtime_backend_status,
 )
+from .campaign_rounds import run_campaign_rounds
 from .concolic_sync import run_corpus_sync
 from .container_build import build_target
 from .scaffold import scaffold_target, select_targets
@@ -362,6 +363,25 @@ class AgenticFuzzEngine:
                 {"project": "string", "only_steps": "array", "timeout_seconds": "number", "workspace_root": "string"},
             ),
             _tool(
+                "campaign_round_run",
+                "Run bounded sequential campaign rounds (fuzz -> symcc sync -> periodic klee -> ASAN-replay intake -> dedupe -> checkpoint) with disk-headroom guards.",
+                {
+                    "project": "string",
+                    "run_id": "string",
+                    "rounds": "integer",
+                    "fuzz_seconds": "number",
+                    "rss_limit_mb": "integer",
+                    "sync_max_inputs": "integer",
+                    "sync_seconds": "number",
+                    "sync_memory_mb": "integer",
+                    "klee_config": "string",
+                    "klee_every": "integer",
+                    "klee_seconds": "number",
+                    "workspace_root": "string",
+                    "min_free_gb": "number",
+                },
+            ),
+            _tool(
                 "symbolic_corpus_sync",
                 "Run one bounded SymCC corpus-sync pass: unseen corpus entries through the concolic binary, solver variants hashed back into the corpus.",
                 {
@@ -584,6 +604,7 @@ class AgenticFuzzEngine:
             "target_scaffold": self._target_scaffold,
             "target_build": self._target_build,
             "symbolic_corpus_sync": self._symbolic_corpus_sync,
+            "campaign_round_run": self._campaign_round_run,
             "fuzz_ensemble_run": self._fuzz_ensemble_run,
             "symbolic_worker_run": self._symbolic_worker_run,
             "sarif_reachability_run": self._sarif_reachability_run,
@@ -1015,6 +1036,24 @@ class AgenticFuzzEngine:
             workspace_root=args.get("workspace_root") or None,
             only_steps=_string_list(args.get("only_steps"), key="only_steps") or None,
             timeout_seconds=args.get("timeout_seconds", 900),
+        )
+
+    def _campaign_round_run(self, args: dict[str, Any]) -> dict[str, Any]:
+        return run_campaign_rounds(
+            self,
+            project=_required(args, "project"),
+            run_id=args.get("run_id") or None,
+            rounds=int(args.get("rounds", 1)),
+            fuzz_seconds=args.get("fuzz_seconds", 600),
+            rss_limit_mb=int(args.get("rss_limit_mb", 2048)),
+            sync_max_inputs=int(args.get("sync_max_inputs", 32)),
+            sync_seconds=args.get("sync_seconds", 600),
+            sync_memory_mb=int(args.get("sync_memory_mb", 4096)),
+            klee_config=args.get("klee_config") or None,
+            klee_every=int(args.get("klee_every", 4)),
+            klee_seconds=args.get("klee_seconds", 900),
+            workspace_root=args.get("workspace_root") or None,
+            min_free_gb=float(args.get("min_free_gb", 10.0)),
         )
 
     def _symbolic_corpus_sync(self, args: dict[str, Any]) -> dict[str, Any]:

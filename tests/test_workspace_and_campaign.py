@@ -267,6 +267,84 @@ class CorpusSyncTests(unittest.TestCase):
         self.assertEqual(result["inputs_processed"], 2)
 
 
+class _StubEngine:
+    def __init__(self, crash_dir: Path) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self._crash_dir = crash_dir
+
+    def call_tool(self, name: str, args: dict) -> dict:
+        self.calls.append((name, args))
+        if name == "campaign_start":
+            return {"run_id": "run-test"}
+        if name == "fuzz_ensemble_run":
+            return {
+                "ok": True,
+                "crash_files": [str(self._crash_dir / "crash-1")],
+                "worker_results": [{"worker": "libfuzzer", "executed": True, "crash_dir": str(self._crash_dir)}],
+                "blockers": [],
+            }
+        if name == "crash_import":
+            return {"findings": [{"finding_id": "f-1"}]}
+        if name == "finding_dedupe":
+            return {"groups": [{"representative": {"finding_id": "f-1"}}]}
+        return {"ok": True}
+
+
+class CampaignRoundsTests(unittest.TestCase):
+    def test_round_run_chains_lanes_and_summarizes(self) -> None:
+        from agentic_fuzz_engine.campaign_rounds import run_campaign_rounds
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp) / "ws"
+            bin_dir = ws / "bin" / "demo"
+            bin_dir.mkdir(parents=True)
+            fuzzer = bin_dir / "fuzzer"
+            fuzzer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fuzzer.chmod(0o755)
+            crash_dir = Path(tmp) / "crashes"
+            crash_dir.mkdir()
+            (crash_dir / "crash-1").write_bytes(b"boom")
+            engine = _StubEngine(crash_dir)
+
+            result = run_campaign_rounds(
+                engine,
+                project="localfuzz/c/demo",
+                rounds=2,
+                fuzz_seconds=5,
+                workspace_root=ws,
+                env=dict(os.environ),
+            )
+
+        self.assertTrue(result["ok"], result["blockers"])
+        self.assertEqual(result["rounds_completed"], 2)
+        self.assertEqual(result["findings_recorded"], 2)
+        tool_names = [name for name, _ in engine.calls]
+        self.assertEqual(tool_names.count("fuzz_ensemble_run"), 2)
+        self.assertEqual(tool_names.count("crash_import"), 2)
+        self.assertEqual(tool_names.count("finding_dedupe"), 2)
+        self.assertEqual(tool_names.count("campaign_checkpoint_record"), 2)
+        # klee lane must not run without a config
+        self.assertNotIn("symbolic_worker_run", tool_names)
+        round_one = result["rounds"][0]
+        self.assertIn("skipped", round_one["symcc_sync"])
+        self.assertEqual(round_one["intake"]["findings_recorded"], 1)
+
+    def test_round_run_blocks_without_fuzzer_binary(self) -> None:
+        from agentic_fuzz_engine.campaign_rounds import run_campaign_rounds
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = _StubEngine(Path(tmp))
+            result = run_campaign_rounds(
+                engine,
+                project="localfuzz/c/none",
+                workspace_root=Path(tmp) / "ws",
+                env=dict(os.environ),
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("missing ASAN fuzzer binary", result["blockers"][0])
+        self.assertEqual(result["rounds_completed"], 0)
+
+
 class ScaffoldTests(unittest.TestCase):
     def _write_sinks(self, path: Path) -> None:
         rows = [
