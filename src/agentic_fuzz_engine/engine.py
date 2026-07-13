@@ -37,6 +37,7 @@ from .runtime_backends import (
     run_symbolic_worker,
     runtime_backend_status,
 )
+from .concolic_sync import run_corpus_sync
 from .container_build import build_target
 from .scaffold import scaffold_target, select_targets
 from .state import EngineState
@@ -361,6 +362,20 @@ class AgenticFuzzEngine:
                 {"project": "string", "only_steps": "array", "timeout_seconds": "number", "workspace_root": "string"},
             ),
             _tool(
+                "symbolic_corpus_sync",
+                "Run one bounded SymCC corpus-sync pass: unseen corpus entries through the concolic binary, solver variants hashed back into the corpus.",
+                {
+                    "corpus_dir": "string",
+                    "symcc_binary": "string",
+                    "state_dir": "string",
+                    "max_inputs": "integer",
+                    "max_seconds": "number",
+                    "per_input_timeout": "number",
+                    "max_memory_mb": "integer",
+                    "max_new_files": "integer",
+                },
+            ),
+            _tool(
                 "workspace_init",
                 "Create or refresh the generated dot-directory workspace (reference-root layout, DooD path maps, docker images, env file, optional asset imports).",
                 {
@@ -568,6 +583,7 @@ class AgenticFuzzEngine:
             "target_select": self._target_select,
             "target_scaffold": self._target_scaffold,
             "target_build": self._target_build,
+            "symbolic_corpus_sync": self._symbolic_corpus_sync,
             "fuzz_ensemble_run": self._fuzz_ensemble_run,
             "symbolic_worker_run": self._symbolic_worker_run,
             "sarif_reachability_run": self._sarif_reachability_run,
@@ -999,6 +1015,18 @@ class AgenticFuzzEngine:
             workspace_root=args.get("workspace_root") or None,
             only_steps=_string_list(args.get("only_steps"), key="only_steps") or None,
             timeout_seconds=args.get("timeout_seconds", 900),
+        )
+
+    def _symbolic_corpus_sync(self, args: dict[str, Any]) -> dict[str, Any]:
+        return run_corpus_sync(
+            corpus_dir=_required(args, "corpus_dir"),
+            symcc_binary=_required(args, "symcc_binary"),
+            state_dir=args.get("state_dir") or None,
+            max_inputs=int(args.get("max_inputs", 32)),
+            max_seconds=args.get("max_seconds", 600),
+            per_input_timeout=args.get("per_input_timeout", 90),
+            max_memory_mb=int(args.get("max_memory_mb", 4096)),
+            max_new_files=int(args.get("max_new_files", 500)),
         )
 
     def _workspace_init(self, args: dict[str, Any]) -> dict[str, Any]:

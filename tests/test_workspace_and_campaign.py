@@ -185,6 +185,88 @@ class KleeBackendTests(unittest.TestCase):
             self.assertIn("workspace config not found", missing_workspace["blockers"][0])
 
 
+class CorpusSyncTests(unittest.TestCase):
+    def _write_fake_symcc(self, path: Path) -> None:
+        path.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import os, pathlib, sys",
+                    "out = pathlib.Path(os.environ['SYMCC_OUTPUT_DIR'])",
+                    "seed = pathlib.Path(sys.argv[1]).read_bytes()",
+                    "(out / 'variant0').write_bytes(seed)",
+                    "raise SystemExit(0)",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+
+    def test_corpus_sync_feeds_solved_variants_back_and_tracks_seen(self) -> None:
+        from agentic_fuzz_engine.concolic_sync import run_corpus_sync
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            corpus = tmp_path / "corpus"
+            corpus.mkdir()
+            (corpus / "seed-a").write_bytes(b"aaaa")
+            (corpus / "seed-b").write_bytes(b"bbbb")
+            binary = tmp_path / "fake-symcc"
+            self._write_fake_symcc(binary)
+
+            first = run_corpus_sync(
+                corpus_dir=corpus,
+                symcc_binary=binary,
+                max_inputs=10,
+                max_seconds=30,
+                per_input_timeout=10,
+                env=dict(os.environ),
+            )
+
+            self.assertTrue(first["ok"], first["blockers"])
+            self.assertEqual(first["inputs_processed"], 2)
+            self.assertEqual(first["new_seeds_added"], 2)
+            solved = [entry.name for entry in corpus.iterdir() if entry.name.startswith("symcc-")]
+            self.assertEqual(len(solved), 2)
+
+            second = run_corpus_sync(
+                corpus_dir=corpus,
+                symcc_binary=binary,
+                max_inputs=10,
+                max_seconds=30,
+                per_input_timeout=10,
+                env=dict(os.environ),
+            )
+            # solved variants are new corpus entries, so they get processed once;
+            # their content-identical outputs dedupe to zero new seeds.
+            self.assertEqual(second["inputs_processed"], 2)
+            self.assertEqual(second["new_seeds_added"], 0)
+
+    def test_corpus_sync_respects_input_budget(self) -> None:
+        from agentic_fuzz_engine.concolic_sync import run_corpus_sync
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            corpus = tmp_path / "corpus"
+            corpus.mkdir()
+            for index in range(5):
+                (corpus / f"seed-{index}").write_bytes(bytes([index]))
+            binary = tmp_path / "fake-symcc"
+            self._write_fake_symcc(binary)
+
+            result = run_corpus_sync(
+                corpus_dir=corpus,
+                symcc_binary=binary,
+                max_inputs=2,
+                max_seconds=30,
+                per_input_timeout=10,
+                env=dict(os.environ),
+            )
+
+        self.assertEqual(result["inputs_processed"], 2)
+
+
 class ScaffoldTests(unittest.TestCase):
     def _write_sinks(self, path: Path) -> None:
         rows = [

@@ -325,6 +325,15 @@ def main(argv: list[str] | None = None) -> int:
     target_build_parser.add_argument("--only-step", action="append", dest="only_steps", default=[])
     target_build_parser.add_argument("--timeout-seconds", type=float, default=900)
     target_build_parser.add_argument("--workspace-root", default=None)
+    corpus_sync_parser = subcommands.add_parser("symbolic-corpus-sync")
+    corpus_sync_parser.add_argument("--corpus-dir", required=True)
+    corpus_sync_parser.add_argument("--symcc-binary", required=True)
+    corpus_sync_parser.add_argument("--state-dir", default=None)
+    corpus_sync_parser.add_argument("--max-inputs", type=int, default=32)
+    corpus_sync_parser.add_argument("--max-seconds", type=float, default=600)
+    corpus_sync_parser.add_argument("--per-input-timeout", type=float, default=90)
+    corpus_sync_parser.add_argument("--max-memory-mb", type=int, default=4096)
+    corpus_sync_parser.add_argument("--max-new-files", type=int, default=500)
     fuzz_ensemble = subcommands.add_parser("fuzz-ensemble-run")
     fuzz_ensemble.add_argument("run_id")
     fuzz_ensemble.add_argument("--target", required=True)
@@ -863,6 +872,20 @@ def main(argv: list[str] | None = None) -> int:
                 "only_steps": args.only_steps,
                 "timeout_seconds": args.timeout_seconds,
                 "workspace_root": args.workspace_root,
+            },
+        )
+    elif args.command == "symbolic-corpus-sync":
+        payload = engine.call_tool(
+            "symbolic_corpus_sync",
+            {
+                "corpus_dir": args.corpus_dir,
+                "symcc_binary": args.symcc_binary,
+                "state_dir": args.state_dir,
+                "max_inputs": args.max_inputs,
+                "max_seconds": args.max_seconds,
+                "per_input_timeout": args.per_input_timeout,
+                "max_memory_mb": args.max_memory_mb,
+                "max_new_files": args.max_new_files,
             },
         )
     elif args.command == "fuzz-ensemble-run":
