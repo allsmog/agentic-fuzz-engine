@@ -20,6 +20,7 @@ from .fidelity import discover_reference_benchmarks, load_target_profile, resolv
 from .finding_lifecycle import audit_finding_lifecycle
 from .fuzzing import build_fuzz_candidates, extract_coverage_features, summarize_harness_run
 from .full_campaign import run_owned_local_full_campaign
+from .gc import run_campaign_gc
 from .grading import grade_finding_artifact
 from .grammar import infer_grammar_from_source
 from .guardrails import audit_runtime_guard_runtime_calls
@@ -379,6 +380,11 @@ class AgenticFuzzEngine:
                 {"project": "string", "only_steps": "array", "timeout_seconds": "number", "workspace_root": "string"},
             ),
             _tool(
+                "campaign_gc",
+                "Reclaim disk: bounded corpus minimize (-merge=1 with atomic swap) plus run-dir and KLEE-output retention pruning, containment-checked.",
+                {"target": "string", "workspace_root": "string"},
+            ),
+            _tool(
                 "plateau_status",
                 "Fold per-round metrics into per-target plateau verdicts and next-rung recommendations (signals only; no side effects).",
                 {"target": "string", "workspace_root": "string"},
@@ -633,6 +639,7 @@ class AgenticFuzzEngine:
             "symbolic_corpus_sync": self._symbolic_corpus_sync,
             "campaign_round_run": self._campaign_round_run,
             "plateau_status": self._plateau_status,
+            "campaign_gc": self._campaign_gc,
             "candidate_ledger": self._candidate_ledger,
             "fuzz_ensemble_run": self._fuzz_ensemble_run,
             "symbolic_worker_run": self._symbolic_worker_run,
@@ -1065,6 +1072,13 @@ class AgenticFuzzEngine:
             workspace_root=args.get("workspace_root") or None,
             only_steps=_string_list(args.get("only_steps"), key="only_steps") or None,
             timeout_seconds=args.get("timeout_seconds", 900),
+        )
+
+    def _campaign_gc(self, args: dict[str, Any]) -> dict[str, Any]:
+        return run_campaign_gc(
+            workspace_root=args.get("workspace_root") or None,
+            target=args.get("target") or None,
+            data_root=self.state.data_root,
         )
 
     def _plateau_status(self, args: dict[str, Any]) -> dict[str, Any]:

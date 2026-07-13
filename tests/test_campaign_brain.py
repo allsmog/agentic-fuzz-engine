@@ -246,5 +246,81 @@ class CandidateLedgerTests(unittest.TestCase):
         self.assertEqual(second["events_appended"], [])
 
 
+class GcTests(unittest.TestCase):
+    def _write_fake_merger(self, path: Path) -> None:
+        # honors: fuzzer -merge=1 <new> <old> ... -> writes half the files
+        path.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import pathlib, sys",
+                    "new_dir = pathlib.Path(sys.argv[2])",
+                    "old_dir = pathlib.Path(sys.argv[3])",
+                    "files = sorted(p for p in old_dir.iterdir() if p.is_file())",
+                    "for p in files[: max(1, len(files) // 2)]:",
+                    "    (new_dir / p.name).write_bytes(p.read_bytes())",
+                    "raise SystemExit(0)",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+
+    def test_corpus_merge_swap_and_retention(self) -> None:
+        from agentic_fuzz_engine.gc import run_campaign_gc
+        from agentic_fuzz_engine.workspace import workspace_init
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp) / "ws"
+            workspace_init(root=ws, env={})
+            # tiny thresholds so the merge triggers
+            policy_path = ws / "campaign-policy.json"
+            payload = json.loads(policy_path.read_text(encoding="utf-8"))
+            payload["gc"].update({"gc_corpus_min_files": 3, "gc_corpus_max_mb": 1, "run_retention": 2, "klee_out_retention": 1})
+            policy_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            corpus = ws / "work" / "demo" / "seeds"
+            corpus.mkdir(parents=True)
+            for index in range(8):
+                (corpus / f"seed-{index}").write_bytes(bytes([index]) * 100)
+            bin_dir = ws / "bin" / "demo"
+            bin_dir.mkdir(parents=True)
+            self._write_fake_merger(bin_dir / "fuzzer")
+
+            runs = ws / "data" / "runs"
+            for index in range(4):
+                run_dir = runs / f"run-{index}"
+                run_dir.mkdir(parents=True)
+                (run_dir / "blob").write_bytes(b"z" * 50)
+            klee_out = ws / "klee" / "klee-ng-out"
+            for index in range(3):
+                (klee_out / f"tier-{index}").mkdir(parents=True)
+
+            result = run_campaign_gc(workspace_root=ws, env=dict(os.environ))
+
+            self.assertTrue(result["ok"], result["blockers"])
+            merged = result["corpus"][0]
+            self.assertEqual(merged["action"], "merged")
+            self.assertEqual(merged["files_before"], 8)
+            self.assertEqual(merged["files_after"], 4)
+            self.assertEqual(len(list(corpus.iterdir())), 4)
+            self.assertFalse((ws / "work" / "demo" / "seeds.old").exists())
+            self.assertEqual(result["runs_pruned"]["removed"], 2)
+            self.assertEqual(result["klee_out_pruned"]["removed"], 2)
+            self.assertGreater(result["bytes_freed"], 0)
+
+    def test_containment_check_refuses_outside_deletes(self) -> None:
+        from agentic_fuzz_engine.gc import _contained_rmtree
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            victim = tmp_path / "victim"
+            victim.mkdir()
+            with self.assertRaises(ValueError):
+                _contained_rmtree(victim, tmp_path / "unrelated")
+            self.assertTrue(victim.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -273,6 +273,22 @@ def run_campaign_rounds(
                 note=target_assessment.get("verdict"),
                 skip_if_in={"confirmed", "dead"},
             )
+
+        gc_every = int(load_policy(root, env=environment).get("gc", {}).get("gc_every", 5))
+        if gc_every > 0 and index % gc_every == 0:
+            from .gc import run_campaign_gc
+
+            gc_result = run_campaign_gc(
+                workspace_root=root,
+                target=name,
+                data_root=getattr(getattr(engine, "state", None), "data_root", None),
+                env=environment,
+            )
+            summary["gc"] = {
+                "bytes_freed": gc_result["bytes_freed"],
+                "runs_pruned": gc_result["runs_pruned"]["removed"],
+                "blockers": gc_result["blockers"],
+            }
         round_summaries.append(summary)
 
     return _summary(active_run_id, target, rounds_done=round_summaries, corpus=corpus, blockers=blockers)

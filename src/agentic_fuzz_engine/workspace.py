@@ -31,6 +31,7 @@ DEFAULT_POLICY: dict[str, Any] = {
         "klee_out_retention": 5,
         "gc_corpus_min_files": 2000,
         "gc_corpus_max_mb": 512,
+        "merge_timeout_seconds": 600,
     },
     "disk": {"min_free_gb": 10},
 }

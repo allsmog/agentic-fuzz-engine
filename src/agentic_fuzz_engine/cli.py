@@ -334,6 +334,9 @@ def main(argv: list[str] | None = None) -> int:
     target_build_parser.add_argument("--only-step", action="append", dest="only_steps", default=[])
     target_build_parser.add_argument("--timeout-seconds", type=float, default=900)
     target_build_parser.add_argument("--workspace-root", default=None)
+    gc_parser = subcommands.add_parser("campaign-gc")
+    gc_parser.add_argument("target", nargs="?", default=None)
+    gc_parser.add_argument("--workspace-root", default=None)
     plateau_parser = subcommands.add_parser("plateau-status")
     plateau_parser.add_argument("target", nargs="?", default=None)
     plateau_parser.add_argument("--workspace-root", default=None)
@@ -921,6 +924,10 @@ def main(argv: list[str] | None = None) -> int:
                 "timeout_seconds": args.timeout_seconds,
                 "workspace_root": args.workspace_root,
             },
+        )
+    elif args.command == "campaign-gc":
+        payload = engine.call_tool(
+            "campaign_gc", {"target": args.target, "workspace_root": args.workspace_root}
         )
     elif args.command == "plateau-status":
         payload = engine.call_tool(
