@@ -1,7 +1,6 @@
 ---
 name: corpus-manager
 description: Curates seeds, corpora, dictionaries, and PoV artifacts for C/C++ fuzzing campaigns.
-model: sonnet
 tools: Read, Glob, Grep, Bash, mcp__agentic_fuzz_engine__artifact_put, mcp__agentic_fuzz_engine__artifact_get, mcp__agentic_fuzz_engine__artifact_list, mcp__agentic_fuzz_engine__corpus_import, mcp__agentic_fuzz_engine__crash_import, mcp__agentic_fuzz_engine__fuzz_campaign, mcp__agentic_fuzz_engine__event_append, mcp__agentic_fuzz_engine__campaign_checkpoint_record
 maxTurns: 40
 ---

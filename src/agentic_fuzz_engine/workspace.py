@@ -22,9 +22,61 @@ from typing import Any, Mapping
 WORKSPACE_ENV = "AGENTIC_FUZZ_WORKSPACE"
 POLICY_FILE_NAME = "campaign-policy.json"
 DEFAULT_POLICY: dict[str, Any] = {
-    "round": {"fuzz_seconds": 1800, "sync_max_inputs": 32, "klee_every": 4, "rss_limit_mb": 2048},
-    "plateau": {"metric": "features", "flat_rounds": 3},
-    "ladder": ["dictionary", "structured-seeds", "klee-directed", "symcc-long"],
+    "round": {
+        "fuzz_seconds": 1800,
+        "sync_max_inputs": 32,
+        "klee_every": 4,
+        "rss_limit_mb": 2048,
+        "fork_on_known_crashes": True,
+        "known_probe_timeout_seconds": 10,
+        "stale_policy": "warn",
+    },
+    "staleness": {"max_files": 4000},
+    "plateau": {"metric": "features", "flat_rounds": 3, "rotate_after_known_only_rounds": 5},
+    "ladder": ["frontier", "directed-allowlist", "dictionary", "structured-seeds", "klee-directed", "symcc-long"],
+    "frontier": {"coverage_timeout": 120, "top": 5, "close_seed_max_inputs": 16, "close_seed_max_seconds": 120},
+    "weights": {
+        "enabled": False,
+        "focus_fraction": 0.25,
+        "focus_top_k": 64,
+        "focus_min_indexed": 32,
+        "cov_max_new_per_round": 48,
+        "cov_max_seconds": 180,
+        "cov_per_input_timeout": 20,
+        "rebalance_every": 1,
+        "bit_weight_default": 8,
+    },
+    "symcc": {
+        "crossover_enabled": True,
+        "solutions_max": 512,
+        "max_patches": 16,
+        "max_tail_bytes": 64,
+        "max_parent_bytes": 1048576,
+        "crossover_inputs": 16,
+        "crossover_apply": 3,
+        "crossover_new_max": 64,
+        "dict_harvest_max": 16,
+        "dict_harvest_total": 256,
+    },
+    "directed": {
+        "enabled": True,
+        "execute": True,
+        "fraction": 0.25,
+        "budget_rounds": 6,
+        "max_tasks_per_target": 4,
+        "max_tasks_total": 24,
+        "primitives": ["write", "exec"],
+        "priority_decay": 10,
+    },
+    "codec": {
+        "min_parse_rate": 0.9,
+        "validate_samples": 64,
+        "max_seconds": 60,
+        "memory_mb": 1024,
+        "max_decode_bytes": 65536,
+        "require_roundtrip": False,
+        "qualify_default_from_sinks": True,
+    },
     "gc": {
         "gc_every": 5,
         "run_retention": 10,
@@ -32,8 +84,42 @@ DEFAULT_POLICY: dict[str, Any] = {
         "gc_corpus_min_files": 2000,
         "gc_corpus_max_mb": 512,
         "merge_timeout_seconds": 600,
+        "known_crash_inputs_retention": 200,
+        "archive_max_mb": 64,
+        "archive_events_tail_kb": 256,
+        "archive_retention": 100,
     },
+    "impact": {"auto": True, "replay_timeout_seconds": 60, "lead_window": 60},
+    "report": {"require_reachability": "warn"},
+    "flags": {"replay_timeout_seconds": 30},
+    "spec_probe": {"max_iterations": 12, "max_include_dirs": 64, "max_link_sources": 400, "compile_timeout": 300},
+    "reachability": {"max_files": 20000, "scan_timeout_seconds": 120},
     "disk": {"min_free_gb": 10},
+    "fleet": {
+        # Background-worker job queue (jobs.py + tools/dispatcher). Disabled
+        # by default: the dispatcher refuses to launch workers until an
+        # operator flips this in the workspace policy.
+        "enabled": False,
+        "max_workers": 4,
+        "max_build_workers": 2,
+        "daily_usd_cap": 150.0,
+        "max_attempts": 3,
+        "plan_interval_hours": 24,
+        "model": None,
+        "max_open_per_type": 8,
+        "max_new_per_sync": 12,
+        "job_caps": {
+            "harness_author": {"max_usd": 8.0, "wall_seconds": 3600},
+            "frontier_seed": {"max_usd": 5.0, "wall_seconds": 2400},
+            "steering": {"max_usd": 3.0, "wall_seconds": 1800},
+            "allowlist_build": {"max_usd": 5.0, "wall_seconds": 3600},
+            "solver_assist": {"max_usd": 5.0, "wall_seconds": 2400},
+            "triage": {"max_usd": 4.0, "wall_seconds": 1800},
+            "fleet_plan": {"max_usd": 4.0, "wall_seconds": 1200},
+            "vuln_hunt": {"max_usd": 4.0, "wall_seconds": 1800},
+            "pov_produce": {"max_usd": 6.0, "wall_seconds": 2400},
+        },
+    },
 }
 KLEE_IMAGE_ENV = "AGENTIC_FUZZ_KLEE_IMAGE"
 WORKSPACE_CONFIG_NAME = "workspace.json"
@@ -56,6 +142,24 @@ def resolve_workspace_root(path: str | Path | None = None, *, env: Mapping[str, 
     if raw is None or not os.fspath(raw).strip():
         raw = Path.home() / ".cache" / "agentic-fuzz"
     return Path(raw).expanduser().resolve()
+
+
+def default_data_root(*, env: Mapping[str, str] | None = None) -> str:
+    """Engine state home when --data-root is not given.
+
+    Precedence: $CLAUDE_PLUGIN_DATA, then <workspace>/data when an initialized
+    workspace is resolvable (campaign state and crash output must never land
+    in the engine repo tree just because env.sh wasn't sourced), then the
+    legacy cwd-relative runs dir.
+    """
+    environment = env if env is not None else os.environ
+    explicit = environment.get("CLAUDE_PLUGIN_DATA")
+    if explicit and explicit.strip():
+        return explicit
+    root = resolve_workspace_root(env=environment)
+    if (root / WORKSPACE_CONFIG_NAME).is_file():
+        return str(root / "data")
+    return "runs/agentic-fuzz-engine"
 
 
 def load_workspace(path: str | Path | None = None, *, env: Mapping[str, str] | None = None) -> dict[str, Any]:

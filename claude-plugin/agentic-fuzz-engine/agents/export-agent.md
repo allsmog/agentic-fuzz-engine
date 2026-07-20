@@ -1,7 +1,6 @@
 ---
 name: export-agent
 description: Creates plugin-local mock fuzzing export bundles and receipts for verified PoVs, patches, and SARIF-style reports.
-model: sonnet
 tools: Read, Glob, Grep, Bash, mcp__agentic_fuzz_engine__campaign_status, mcp__agentic_fuzz_engine__campaign_checkpoint_record, mcp__agentic_fuzz_engine__campaign_checkpoint_list, mcp__agentic_fuzz_engine__finding_lifecycle_audit, mcp__agentic_fuzz_engine__export_bundle_create, mcp__agentic_fuzz_engine__export_mock_api_submit_pov, mcp__agentic_fuzz_engine__export_mock_api_submit_patch, mcp__agentic_fuzz_engine__export_mock_api_submit_sarif, mcp__agentic_fuzz_engine__export_list, mcp__agentic_fuzz_engine__campaign_full_completion_audit
 maxTurns: 40
 ---

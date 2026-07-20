@@ -43,11 +43,27 @@ def select_targets(
     rows = _load_sink_rows(sinks_path)
     existing = _existing_targets(root)
 
+    from .boundaries import classify_path, load_boundaries
+    from .sink_scan import PRIMITIVE_WEIGHT
+
+    boundaries = load_boundaries(root)
+
     groups: dict[str, dict[str, Any]] = {}
     for row in rows:
         tag = str(row.get("tag") or "untagged")
-        group = groups.setdefault(tag, {"tag": tag, "sink_count": 0, "files": set(), "sample": None})
+        group = groups.setdefault(
+            tag,
+            {"tag": tag, "sink_count": 0, "files": set(), "sample": None,
+             "boundary_weight": 0, "entry_classes": {}},
+        )
         group["sink_count"] += 1
+        entry_class = row.get("entry_class")
+        if not isinstance(entry_class, str) or not entry_class:
+            entry_class, class_weight = classify_path(str(row.get("file") or ""), boundaries)
+        else:
+            _, class_weight = classify_path(str(row.get("file") or ""), boundaries)
+        group["entry_classes"][entry_class] = group["entry_classes"].get(entry_class, 0) + 1
+        group["boundary_weight"] += PRIMITIVE_WEIGHT.get(str(row.get("primitive") or ""), 1) * class_weight
         if row.get("file"):
             group["files"].add(str(row["file"]))
         if group["sample"] is None:
@@ -64,9 +80,13 @@ def select_targets(
                 "file_count": len(group["files"]),
                 "harnessed": slug in existing,
                 "sample_sink": group["sample"],
+                "boundary_weight": group["boundary_weight"],
+                "entry_classes": group["entry_classes"],
             }
         )
-    vectors.sort(key=lambda item: (item["harnessed"], -item["sink_count"]))
+    # boundary_weight degenerates to a sink-count-proportional score when no
+    # boundaries map exists, so pre-boundary workspaces rank as before.
+    vectors.sort(key=lambda item: (item["harnessed"], -item["boundary_weight"], -item["sink_count"]))
     return {
         "ok": True,
         "sinks_jsonl": str(sinks_path),
@@ -114,6 +134,11 @@ def scaffold_target(
     written.append(_write(target_dir / ".localfuzz" / "config.yaml", _render_localfuzz_config(name)))
     written.append(_write(target_dir / ".localfuzz" / "build.json", _render_build_json(name)))
     written.append(_write(target_dir / "harness.cpp", _render_harness(name, sink_refs)))
+    from .flag_profiles import PRELUDE_NAME, render_flag_prelude
+
+    prelude_path = target_dir / PRELUDE_NAME
+    if not prelude_path.exists():
+        written.append(_write(prelude_path, render_flag_prelude(None)))
     dict_path = target_dir / f"{name}.dict"
     if not dict_path.exists():
         written.append(_write(dict_path, "# tokens for {name}: one quoted token per line\n".format(name=name)))
@@ -180,6 +205,7 @@ def _render_project_yaml(name: str) -> str:
         "language: c++\n"
         "sanitizers:\n"
         "  - address\n"
+        "  - undefined\n"
         "fuzzing_engines:\n"
         "  - libfuzzer\n"
         "  - symcc\n"
@@ -208,7 +234,8 @@ def _render_build_json(name: str) -> str:
                 "argv": [
                     "clang++",
                     "-std=c++17", "-g", "-O1",
-                    "-fsanitize=fuzzer,address",
+                    "-fsanitize=fuzzer,address,undefined",
+                    "-fno-sanitize-recover=undefined",
                     "-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION",
                     "-I{source_dir}",
                     "{target_dir}/harness.cpp",
@@ -253,6 +280,9 @@ def _render_harness(name: str, sink_refs: list[dict[str, Any]]) -> str:
         "#include <cstdint>",
         "",
         "// TODO(human): include the target headers needed to reach the sinks above.",
+        "// Then include the generated flag prelude AFTER them (it assigns FLAGS_*):",
+        "// #include \"flag_profile.inc\"",
+        "// extern \"C\" int LLVMFuzzerInitialize(int *, char ***) { apply_flag_profile(); return 0; }",
         "",
         "extern \"C\" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {",
         "  if (size == 0) {",

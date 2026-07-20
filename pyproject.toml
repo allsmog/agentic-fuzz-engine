@@ -18,5 +18,5 @@ agentic-fuzz-engine = "agentic_fuzz_engine.cli:main"
 agentic-fuzz-engine-mcp = "agentic_fuzz_engine.mcp_stdio:main"
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "tools/dispatcher"]
 testpaths = ["tests"]

@@ -53,6 +53,7 @@ def plateau_status(
     policy = load_policy(root, env=env)
     metric = str(policy["plateau"].get("metric", "features"))
     flat_rounds = max(1, int(policy["plateau"].get("flat_rounds", 3)))
+    rotate_after = max(1, int(policy["plateau"].get("rotate_after_known_only_rounds", 5)))
     ladder = [str(item) for item in policy.get("ladder", [])]
     ledger = _ledger_current_state(root)
 
@@ -64,7 +65,12 @@ def plateau_status(
     targets = []
     for name in names:
         rounds = _read_rounds(work_dir / name / "rounds.jsonl")
-        targets.append(_assess_target(name, rounds, metric=metric, flat_rounds=flat_rounds, ladder=ladder, ledger=ledger))
+        targets.append(
+            _assess_target(
+                name, rounds, metric=metric, flat_rounds=flat_rounds, ladder=ladder, ledger=ledger,
+                rotate_after=rotate_after, root=root,
+            )
+        )
     return {
         "ok": True,
         "mode": "plateau-status",
@@ -83,6 +89,8 @@ def _assess_target(
     flat_rounds: int,
     ladder: list[str],
     ledger: dict[str, dict[str, Any]],
+    rotate_after: int = 5,
+    root: Path | None = None,
 ) -> dict[str, Any]:
     series = []
     findings_total = 0
@@ -113,20 +121,85 @@ def _assess_target(
     else:
         verdict = "growing"
 
+    known_only = _known_only_streak(rounds)
     tried = _tried_rungs(ledger.get(name, {}))
     next_rung = next((rung for rung in ladder if rung not in tried), None)
+    recommendation = None
+    if verdict.startswith("plateaued") and known_only >= rotate_after:
+        # The target keeps producing crashes, but every one maps to a known
+        # root signature: escalation rungs deepen the same holes, so the
+        # budget should move to another candidate.
+        recommendation = "rotate-target"
+        next_rung = "rotate-target"
+
+    directed_surface: dict[str, Any] | None = None
+    if root is not None and verdict.startswith("plateaued") and "frontier" in tried:
+        # Broad fuzzing exhausted and the frontier already ran: if the
+        # directed queue holds a task for this target, aiming beats mutating.
+        try:
+            from .directed import active_or_queued
+
+            task = active_or_queued(root, name)
+        except Exception:
+            task = None
+        if task:
+            directed_surface = {
+                "active_task": {
+                    "id": task.get("id"),
+                    "sink": task.get("sink"),
+                    "method": task.get("method"),
+                    "state": task.get("state"),
+                    "priority": task.get("priority"),
+                },
+                "recommendation": (
+                    f"directed: focus sink {task.get('method')} via allowlist build "
+                    "(rung directed-allowlist)"
+                ),
+            }
+    stale = None
+    if root is not None:
+        from .staleness import check_target_staleness
+
+        stale_check = check_target_staleness(root, name)
+        stale = stale_check.get("stale")
     return {
+        **({"directed": directed_surface} if directed_surface is not None else {}),
         "target": name,
         "rounds_observed": len(rounds),
         "metric_used": metric_used,
         "series_tail": clean[-(flat_rounds + 2):],
         "flat_rounds": flat,
         "findings_total": findings_total,
+        "known_only_rounds": known_only,
         "verdict": verdict,
+        "recommendation": recommendation,
         "rungs_tried": sorted(tried),
         "next_rung": next_rung if verdict.startswith("plateaued") else None,
         "ledger_status": ledger.get(name, {}).get("status"),
+        "stale": stale,
     }
+
+
+def _known_only_streak(rounds: list[dict[str, Any]]) -> int:
+    """Trailing consecutive rounds whose crash activity was all known root
+    signatures. Rounds written before the counter existed (missing key) end
+    the streak — unknown is not evidence of staleness."""
+    streak = 0
+    for record in reversed(rounds):
+        new_roots = record.get("new_root_signatures")
+        if new_roots is None:
+            break
+        intake = record.get("intake") or {}
+        activity = int(intake.get("findings_recorded", 0)) + int(intake.get("known_suppressed", 0))
+        if int(new_roots) == 0 and activity > 0:
+            streak += 1
+        elif int(new_roots) > 0:
+            break
+        else:
+            # Quiet round: no crash activity either way — neutral, streak
+            # neither grows nor resets.
+            continue
+    return streak
 
 
 def _read_rounds(path: Path) -> list[dict[str, Any]]:
@@ -166,6 +239,7 @@ def ledger_append(
     tag: str | None = None,
     note: str | None = None,
     round_index: int | None = None,
+    entry_class: str | None = None,
 ) -> dict[str, Any]:
     if status not in BASE_STATUSES and not re.fullmatch(r"escalated:[a-z0-9_-]+", status):
         raise ValueError(f"invalid status {status!r} (allowed: {sorted(BASE_STATUSES)} or escalated:<rung>)")
@@ -176,6 +250,8 @@ def ledger_append(
         event["tag"] = tag
     if note:
         event["note"] = note
+    if entry_class:
+        event["entry_class"] = entry_class
     if round_index is not None:
         event["round"] = int(round_index)
     with path.open("a", encoding="utf-8") as handle:
@@ -230,9 +306,16 @@ def _ledger_current_state(root: Path) -> dict[str, dict[str, Any]]:
     return state
 
 
-def candidates_list(*, workspace_root: str | Path | None = None, env: Mapping[str, str] | None = None) -> dict[str, Any]:
+def candidates_list(
+    *,
+    workspace_root: str | Path | None = None,
+    entry_class: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     root = resolve_workspace_root(workspace_root, env=env)
     state = _ledger_current_state(root)
+    if entry_class:
+        state = {name: entry for name, entry in state.items() if entry.get("entry_class") == entry_class}
     counts: dict[str, int] = {}
     for entry in state.values():
         counts[str(entry.get("status"))] = counts.get(str(entry.get("status")), 0) + 1
@@ -305,7 +388,11 @@ def candidates_sync(
         ):
             continue
         if current != derived:
-            appended.append(ledger_append(root, name=name, status=derived, tag=vector["tag"]))
+            entry_classes = vector.get("entry_classes") or {}
+            dominant = max(entry_classes, key=entry_classes.get) if entry_classes else None
+            appended.append(
+                ledger_append(root, name=name, status=derived, tag=vector["tag"], entry_class=dominant)
+            )
 
     return {
         "ok": True,

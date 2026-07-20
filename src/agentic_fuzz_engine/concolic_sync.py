@@ -19,18 +19,21 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from hashlib import sha256
 from pathlib import Path
 from time import monotonic
 from typing import Any, Mapping
 
 from .runtime_backends import MIN_FREE_DISK_GB, _run_command, check_disk_headroom
+from .symcc_crossover import extract_solution, record_solutions
 
 MAX_SYNC_INPUTS = 1024
 MAX_SYNC_SECONDS = 3600.0
 MAX_PER_INPUT_TIMEOUT = 600.0
 MAX_NEW_FILES = 5000
 MAX_REPORTED_INPUTS = 50
+MAX_SOLUTION_PARENT_BYTES = 1_048_576
 
 
 def run_corpus_sync(
@@ -45,6 +48,7 @@ def run_corpus_sync(
     max_new_files: int = 500,
     min_free_gb: float = MIN_FREE_DISK_GB,
     env: Mapping[str, str] | None = None,
+    record_solutions_enabled: bool = True,
 ) -> dict[str, Any]:
     environment = dict(os.environ if env is None else env)
     corpus = Path(corpus_dir).expanduser().resolve()
@@ -84,6 +88,7 @@ def run_corpus_sync(
     crashes = 0
     reports = []
     blockers = []
+    solution_records: list[dict[str, Any]] = []
 
     # Snapshot the queue up front: entries this pass writes back into the
     # corpus wait until the next round, so the budget covers real inputs.
@@ -110,13 +115,24 @@ def run_corpus_sync(
         if run["exit_code"] not in (0,) and not run["timed_out"]:
             crashes += 1
 
+        # The byte-delta child-vs-parent is the solved constraint itself;
+        # recorded so the crossover lane can re-apply it to other inputs.
+        parent_bytes: bytes | None = None
+        if record_solutions_enabled:
+            try:
+                if entry.stat().st_size <= MAX_SOLUTION_PARENT_BYTES:
+                    parent_bytes = entry.read_bytes()
+            except OSError:
+                parent_bytes = None
+
         new_here = 0
         for generated in sorted(gen_dir.iterdir()):
             if not generated.is_file():
                 continue
             if added >= new_file_budget:
                 break
-            digest = sha256(generated.read_bytes()).hexdigest()[:20]
+            child_bytes = generated.read_bytes()
+            digest = sha256(child_bytes).hexdigest()[:20]
             destination = corpus / f"symcc-{digest}"
             if destination.exists():
                 continue
@@ -127,6 +143,12 @@ def run_corpus_sync(
             shutil.copy2(generated, destination)
             added += 1
             new_here += 1
+            if parent_bytes is not None:
+                solution = extract_solution(parent_bytes, child_bytes)
+                if solution is not None:
+                    solution["parent"] = entry.name
+                    solution["ts"] = round(time.time(), 2)
+                    solution_records.append(solution)
         if len(reports) < MAX_REPORTED_INPUTS:
             reports.append(
                 {
@@ -140,6 +162,8 @@ def run_corpus_sync(
         if blockers:
             break
 
+    solutions_recorded = record_solutions(state, solution_records) if solution_records else 0
+
     return {
         "ok": not blockers,
         "mode": "symcc-corpus-sync",
@@ -151,6 +175,7 @@ def run_corpus_sync(
         "inputs_processed": processed,
         "nonzero_exits": crashes,
         "new_seeds_added": added,
+        "solutions_recorded": solutions_recorded,
         "elapsed_seconds": round(monotonic() - started, 2),
         "inputs": reports,
         "blockers": blockers,

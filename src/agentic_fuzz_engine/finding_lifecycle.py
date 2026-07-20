@@ -161,3 +161,11 @@ def _event_is_verified(event: dict[str, Any]) -> bool:
 def _latest_ts(events: list[dict[str, Any]]) -> str | None:
     timestamps = [str(event.get("ts")) for event in events if event.get("ts")]
     return max(timestamps) if timestamps else None
+
+
+# Public aliases: the constructive-verification guard on finding_record needs
+# the same matching rules the audit applies, so a record accepted at the tool
+# boundary can never fail the lifecycle audit on evidence grounds.
+event_matches_finding = _event_matches_finding
+event_is_verified = _event_is_verified
+verification_events = _verification_events

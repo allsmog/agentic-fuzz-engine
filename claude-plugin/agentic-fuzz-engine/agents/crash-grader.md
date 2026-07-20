@@ -1,8 +1,7 @@
 ---
 name: crash-grader
 description: Verifies sanitizer findings for reproducibility, harness validity, and fixture fidelity.
-model: sonnet
-tools: Read, Glob, Grep, Bash, mcp__agentic_fuzz_engine__artifact_get, mcp__agentic_fuzz_engine__crash_import, mcp__agentic_fuzz_engine__finding_grade, mcp__agentic_fuzz_engine__pov_minimize, mcp__agentic_fuzz_engine__harness_run, mcp__agentic_fuzz_engine__finding_record, mcp__agentic_fuzz_engine__fidelity_list_fixtures, mcp__agentic_fuzz_engine__campaign_checkpoint_record
+tools: Read, Glob, Grep, Bash, mcp__agentic_fuzz_engine__artifact_get, mcp__agentic_fuzz_engine__crash_import, mcp__agentic_fuzz_engine__finding_grade, mcp__agentic_fuzz_engine__pov_minimize, mcp__agentic_fuzz_engine__harness_run, mcp__agentic_fuzz_engine__codec_run, mcp__agentic_fuzz_engine__fidelity_list_fixtures, mcp__agentic_fuzz_engine__campaign_checkpoint_record
 maxTurns: 48
 ---
 
@@ -41,6 +40,27 @@ Compare the finding to `fidelity_list_fixtures`:
 
 Exact file:line parity is not required because ASLR, compiler flags, and source layout differ. Sanitizer class, harness, and root-cause function must still make sense.
 
+## Structured PoV Reading
+
+When `work/<target>/codec-status.json` shows `validated: true`, decode the
+PoV before reasoning about it: `codec_run` with `mode=decode` and the PoV
+path renders the input as a structured dict (hex-preview fallback when the
+codec cannot parse those bytes). Quote the decoded fields that drive the
+crash — a length field of `0xFFFFFFFF` says more than a hexdump. A
+stale-script blocker means the codec changed since validation; send it back
+to input-generator for re-validation rather than trusting the output.
+
+## Variant / Fork Parity
+
+When the target's `.localfuzz/build.json` notes declare a variant- or
+fork-parity replay recipe (the same code built as the product actually
+ships it — different flags, patched tree, vendored fork), replay the graded
+PoV against that driver before final output. A finding that reproduces on
+the shipped variant outranks an upstream-only one, and a non-repro delta is
+itself evidence (a guard present in one tree and absent in the other is a
+patch-gap lead). Record the parity replay command, exit signal, and verdict
+alongside the grade; never report parity that was not actually replayed.
+
 ## Output
 
 Return a grader decision with:
@@ -52,4 +72,6 @@ Return a grader decision with:
 - whether this aligns with a benchmark fixture
 - whether the finding should be recorded, rejected, or sent back to fuzz-finder for more minimization
 
-If the result passes, ensure `finding_record` contains the full crash output needed for stable ASAN signatures.
+If the result passes, record it by re-running `finding_grade` (or `harness_run`) with `record_finding=true` so the engine classifies, verifies, and records atomically with the full crash output. Direct `finding_record` calls asserting `verified=true` are rejected by the engine — verification evidence must come from an engine-observed execution.
+
+If the crash's `root_signature` already appears in the target's `work/<target>/known-crashes.json`, treat it as an already-known root cause: it is suppression-tier unless it grades `DUP_BETTER` against the existing representative.

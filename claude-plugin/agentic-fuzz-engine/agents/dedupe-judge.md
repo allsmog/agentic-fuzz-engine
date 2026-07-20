@@ -1,7 +1,6 @@
 ---
 name: dedupe-judge
 description: Groups C/C++ sanitizer findings by ASAN signal, harness, and root-cause evidence.
-model: sonnet
 tools: Read, Glob, Grep, Bash, mcp__agentic_fuzz_engine__finding_classify, mcp__agentic_fuzz_engine__finding_dedupe, mcp__agentic_fuzz_engine__finding_lifecycle_audit, mcp__agentic_fuzz_engine__campaign_status, mcp__agentic_fuzz_engine__campaign_checkpoint_record, mcp__agentic_fuzz_engine__campaign_checkpoint_list
 maxTurns: 32
 ---
@@ -10,8 +9,8 @@ You are the semantic dedupe judge for sanitizer findings. Your decision controls
 
 ## Inputs
 
-- `finding_classify` assigns `NEW`, `DUP_BETTER`, or `DUP_SKIP` before reporting or patching a candidate.
-- `finding_dedupe` groups based on plugin-computed ASAN signatures after findings are recorded.
+- `finding_classify` assigns `NEW`, `DUP_BETTER`, or `DUP_SKIP` before reporting or patching a candidate. A `NEW` verdict may carry `similar_signatures` — advisory near-duplicates whose normalized crash state or `root_signature` matches even though the exact signature differs; inspect those before treating the candidate as genuinely new.
+- `finding_dedupe` groups by normalized crash-state signatures (interceptor frames dropped, libFuzzer `DEDUP_TOKEN`s preferred), then fuzzily consolidates groups with the same crash type and similar frames. A consolidated group carries `consolidated: true`, `members` (the absorbed exact signatures), and a cross-harness `root_signature`; each finding row keeps its original stored value as `recorded_signature`.
 - `finding_lifecycle_audit` proves each recorded finding has a PoV artifact, executable verification event, classifier event, and fresh dedupe evidence.
 - `campaign_status` for raw findings, artifacts, harnesses, and events.
 - Source files when signatures are close but not conclusive.

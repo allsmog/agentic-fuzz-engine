@@ -34,3 +34,12 @@ tools/llvm/
 tools/sootup-cli/target/
 tools/symqemu/
 tools/z3/
+
+# --- Fuzzer strays: never commit crash/oom artifacts or core dumps ---
+core
+crash-*
+oom-*
+timeout-*
+leak-*
+data/
+work/

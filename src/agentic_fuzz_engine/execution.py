@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import base64
+import os
+import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -49,8 +52,14 @@ def run_harness_artifact(
         materialized = _materialize_command(command_argv, str(poc_path))
         _validate_command(materialized)
 
+        # In-process symbolization is forced OFF: on EDR-protected hosts the
+        # llvm-symbolizer child blocks at spawn with zero CPU, wedging every
+        # replay until the timeout. Frames are symbolized offline (addr2line)
+        # in _run_once instead, so dedupe signatures still carry real frames.
+        env = _replay_asan_env()
+
         runs = [
-            _run_once(materialized, timeout_seconds=timeout, workdir=workdir, expected_error_token=expected)
+            _run_once(materialized, timeout_seconds=timeout, workdir=workdir, expected_error_token=expected, env=env)
             for _ in range(repeat_count)
         ]
 
@@ -76,18 +85,94 @@ def run_harness_artifact(
     }
 
 
+def _replay_asan_env() -> dict[str, str]:
+    env = dict(os.environ)
+    options = [
+        option
+        for option in env.get("ASAN_OPTIONS", "").split(":")
+        if option and not option.startswith(("symbolize=", "external_symbolizer_path="))
+    ]
+    options.append("symbolize=0")
+    env["ASAN_OPTIONS"] = ":".join(options)
+    return env
+
+
+# Unsymbolized sanitizer frame: `#N 0xPC  (/path/to/module+0xOFFSET)`.
+_UNSYM_FRAME_RE = re.compile(
+    r"^(?P<head>\s*#\d+\s+0x[0-9a-fA-F]+)\s+\((?P<module>/[^)+]+)\+0x(?P<offset>[0-9a-fA-F]+)\)",
+    re.MULTILINE,
+)
+_MAX_SYMBOLIZE_ADDRS = 64
+
+
+def _offline_symbolize(output: str) -> str:
+    """Rewrite unsymbolized frames to `... in FUNC FILE:LINE` via addr2line.
+
+    addr2line is used instead of llvm-symbolizer because EDR holds the latter
+    at spawn indefinitely on protected hosts. Bounded: one addr2line call per
+    referenced module, capped address count, short timeout; on any failure the
+    original output is returned unchanged.
+    """
+    matches = list(_UNSYM_FRAME_RE.finditer(output))
+    if not matches:
+        return output
+    by_module: dict[str, list[str]] = {}
+    for match in matches:
+        offsets = by_module.setdefault(match.group("module"), [])
+        if match.group("offset") not in offsets and len(offsets) < _MAX_SYMBOLIZE_ADDRS:
+            offsets.append(match.group("offset"))
+    addr2line = shutil.which("addr2line")
+    if addr2line is None:
+        return output
+    resolved: dict[tuple[str, str], tuple[str, str]] = {}
+    for module, offsets in by_module.items():
+        if not os.access(module, os.R_OK):
+            continue
+        try:
+            proc = subprocess.run(
+                [addr2line, "-f", "-C", "-e", module, *(f"0x{offset}" for offset in offsets)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        lines = proc.stdout.splitlines()
+        for index, offset in enumerate(offsets):
+            if 2 * index + 1 >= len(lines):
+                break
+            function, file_line = lines[2 * index].strip(), lines[2 * index + 1].strip()
+            if function and function != "??":
+                resolved[(module, offset)] = (function, file_line)
+
+    def _rewrite(match: re.Match[str]) -> str:
+        entry = resolved.get((match.group("module"), match.group("offset")))
+        if entry is None:
+            return match.group(0)
+        function, file_line = entry
+        rewritten = f"{match.group('head')} in {function}"
+        if file_line and not file_line.startswith("??"):
+            rewritten += f" {file_line.split(' ')[0]}"
+        return rewritten
+
+    return _UNSYM_FRAME_RE.sub(_rewrite, output)
+
+
 def _run_once(
     command: list[str],
     *,
     timeout_seconds: float,
     workdir: str | None,
     expected_error_token: str | None,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     started = monotonic()
     try:
         proc = subprocess.run(
             command,
             cwd=workdir or None,
+            env=env,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -107,6 +192,8 @@ def _run_once(
 
     elapsed_ms = int((monotonic() - started) * 1000)
     combined = _clip(stdout + stderr)
+    if "ERROR: " in combined:
+        combined = _offline_symbolize(combined)
     signal = parse_asan_signal(combined)
     observed = f"AddressSanitizer: {signal.crash_type}" if signal else None
     normalized_output = _normalize_asan_token(combined)

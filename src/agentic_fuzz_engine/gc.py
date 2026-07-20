@@ -40,7 +40,8 @@ def run_campaign_gc(
 ) -> dict[str, Any]:
     environment = dict(os.environ if env is None else env)
     root = resolve_workspace_root(workspace_root, env=environment)
-    policy = load_policy(root, env=environment).get("gc", {})
+    full_policy = load_policy(root, env=environment)
+    policy = full_policy.get("gc", {})
     min_files = int(policy.get("gc_corpus_min_files", 2000))
     max_mb = int(policy.get("gc_corpus_max_mb", 512))
     run_retention = int(policy.get("run_retention", 10))
@@ -66,18 +67,57 @@ def run_campaign_gc(
         for name in names
     ]
 
-    runs_root = Path(data_root).expanduser().resolve() / "runs" if data_root else root / "data" / "runs"
-    runs_pruned = _prune_oldest(runs_root, keep=run_retention)
+    resolved_data_root = Path(data_root).expanduser().resolve() if data_root else root / "data"
+    runs_root = resolved_data_root / "runs"
+    archive_root = resolved_data_root / "archive" / "runs"
+    runs_pruned = _prune_runs_with_archive(
+        runs_root,
+        keep=run_retention,
+        archive_root=archive_root,
+        max_mb=int(policy.get("archive_max_mb", 64)),
+        events_tail_kb=int(policy.get("archive_events_tail_kb", 256)),
+    )
+    archives_pruned = _prune_oldest(archive_root, keep=int(policy.get("archive_retention", 100)))
     klee_pruned = _prune_oldest(root / "klee" / "klee-ng-out", keep=klee_retention)
 
-    freed = sum(item.get("bytes_freed", 0) for item in corpus_results) + runs_pruned["bytes_freed"] + klee_pruned["bytes_freed"]
+    # Quarantined known-crash rediscoveries (fuzz-blocker tier) are bounded
+    # here too so a manual campaign-gc reclaims them, not just the round loop.
+    from .known_crashes import prune_known_inputs
+
+    known_inputs_retention = int(policy.get("known_crash_inputs_retention", 200))
+    known_inputs_pruned = {"removed": 0, "kept": 0, "bytes_freed": 0}
+    for name in names:
+        pruned = prune_known_inputs(work_dir / name, retention=known_inputs_retention)
+        for key in known_inputs_pruned:
+            known_inputs_pruned[key] += pruned[key]
+
+    # The symcc solution cache is rewritable by contract — bound it here.
+    from .symcc_crossover import prune_solutions
+
+    symcc_policy = full_policy.get("symcc", {}) if isinstance(full_policy.get("symcc"), dict) else {}
+    solutions_max = int(symcc_policy.get("solutions_max", 512))
+    solutions_pruned = {"kept": 0, "removed": 0}
+    for name in names:
+        pruned = prune_solutions(work_dir / name / "symcc-state", max_entries=solutions_max)
+        for key in solutions_pruned:
+            solutions_pruned[key] += pruned[key]
+
+    freed = (
+        sum(item.get("bytes_freed", 0) for item in corpus_results)
+        + runs_pruned["bytes_freed"]
+        + klee_pruned["bytes_freed"]
+        + known_inputs_pruned["bytes_freed"]
+    )
     blockers = [blocker for item in corpus_results for blocker in item.get("blockers", [])]
     return {
         "ok": not blockers,
         "mode": "campaign-gc",
         "corpus": corpus_results,
         "runs_pruned": runs_pruned,
+        "archives_pruned": archives_pruned,
         "klee_out_pruned": klee_pruned,
+        "known_inputs_pruned": known_inputs_pruned,
+        "solutions_pruned": solutions_pruned,
         "bytes_freed": freed,
         "blockers": blockers,
     }
@@ -190,6 +230,105 @@ def _minimize_corpus(
         "bytes_freed": max(0, freed),
         "merge_exit": run["exit_code"],
     }
+
+
+LEDGER_FILES = ("campaign.json", "findings.jsonl", "checkpoints.jsonl")
+
+
+def _prune_runs_with_archive(
+    runs_root: Path,
+    *,
+    keep: int,
+    archive_root: Path,
+    max_mb: int,
+    events_tail_kb: int,
+) -> dict[str, Any]:
+    """Keep-N-newest pruning for run dirs, but copy each victim's durable
+    core (ledgers, PoV artifacts, reports, capped events tail) into
+    ``archive/runs/<run_id>/`` with a sha256 manifest before deleting."""
+    if not runs_root.is_dir():
+        return {"parent": str(runs_root), "removed": 0, "kept": 0, "bytes_freed": 0, "archived": 0}
+    entries = sorted(
+        (entry for entry in runs_root.iterdir() if entry.is_dir()),
+        key=lambda entry: entry.stat().st_mtime,
+        reverse=True,
+    )
+    removed = 0
+    freed = 0
+    archived = 0
+    for entry in entries[max(0, keep):MAX_PRUNE_DIRS]:
+        try:
+            _archive_run(entry, archive_root / entry.name, max_bytes=max_mb * 1_048_576, events_tail_bytes=events_tail_kb * 1024)
+            archived += 1
+        except OSError:
+            pass  # archive is best-effort; retention must still hold the disk bound
+        freed += _tree_bytes(entry)
+        _contained_rmtree(entry, runs_root)
+        removed += 1
+    return {
+        "parent": str(runs_root),
+        "removed": removed,
+        "kept": min(len(entries), keep),
+        "bytes_freed": freed,
+        "archived": archived,
+        "archive_root": str(archive_root),
+    }
+
+
+def _archive_run(run_dir: Path, dest: Path, *, max_bytes: int, events_tail_bytes: int) -> None:
+    from hashlib import sha256
+
+    dest.mkdir(parents=True, exist_ok=True)
+    manifest: dict[str, Any] = {"run_id": run_dir.name, "files": {}, "skipped": [], "archived_ts": time.time()}
+    budget = max_bytes
+
+    # PoV artifacts referenced by findings, and report artifacts, first —
+    # they are the smallest and the least reconstructible.
+    poc_names: set[str] = set()
+    findings_path = run_dir / "findings.jsonl"
+    if findings_path.is_file():
+        for line in findings_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                poc = json.loads(line).get("poc_artifact")
+            except (json.JSONDecodeError, AttributeError):
+                continue
+            if isinstance(poc, str) and poc:
+                poc_names.add(poc)
+    artifact_dir = run_dir / "artifacts"
+    candidates: list[Path] = []
+    if artifact_dir.is_dir():
+        for item in sorted(artifact_dir.iterdir()):
+            if not item.is_file() or item.is_symlink():
+                continue
+            if item.name in poc_names or "report" in item.name.lower():
+                candidates.append(item)
+    for source in [run_dir / name for name in LEDGER_FILES] + candidates:
+        if not source.is_file() or source.is_symlink():
+            continue
+        size = source.stat().st_size
+        if size > budget:
+            manifest["skipped"].append({"file": source.name, "size": size, "reason": "over archive budget"})
+            continue
+        target = dest / ("artifacts/" + source.name if source.parent == artifact_dir else source.name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        manifest["files"][str(target.relative_to(dest))] = {
+            "size": size,
+            "sha256": sha256(source.read_bytes()).hexdigest(),
+        }
+        budget -= size
+
+    events = run_dir / "events.jsonl"
+    if events.is_file() and budget > 0:
+        data = events.read_bytes()
+        tail = data[-min(len(data), events_tail_bytes, budget):]
+        (dest / "events-tail.jsonl").write_bytes(tail)
+        manifest["files"]["events-tail.jsonl"] = {
+            "size": len(tail),
+            "sha256": sha256(tail).hexdigest(),
+            "truncated": len(tail) < len(data),
+        }
+    (dest / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _prune_oldest(parent: Path, *, keep: int) -> dict[str, Any]:

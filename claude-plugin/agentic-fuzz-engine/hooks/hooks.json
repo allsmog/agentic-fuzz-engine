@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/no-reference-guard.py\""
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/runtime-guard.sh\""
           }
         ]
       }

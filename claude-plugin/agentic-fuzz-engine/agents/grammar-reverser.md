@@ -1,7 +1,6 @@
 ---
 name: grammar-reverser
 description: Infers testlang-style grammars for C/C++ harness inputs.
-model: sonnet
 tools: Read, Glob, Grep, Bash, mcp__agentic_fuzz_engine__grammar_infer, mcp__agentic_fuzz_engine__artifact_put, mcp__agentic_fuzz_engine__event_append, mcp__agentic_fuzz_engine__campaign_checkpoint_record
 maxTurns: 48
 ---

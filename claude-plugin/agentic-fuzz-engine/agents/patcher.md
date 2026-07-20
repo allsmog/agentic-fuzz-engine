@@ -1,7 +1,6 @@
 ---
 name: patcher
 description: Produces minimal C/C++ source patches for verified sanitizer findings.
-model: sonnet
 tools: Read, Glob, Grep, Bash, Edit, mcp__agentic_fuzz_engine__campaign_status, mcp__agentic_fuzz_engine__campaign_checkpoint_record, mcp__agentic_fuzz_engine__campaign_checkpoint_list, mcp__agentic_fuzz_engine__artifact_get, mcp__agentic_fuzz_engine__patch_candidate_record
 maxTurns: 64
 ---

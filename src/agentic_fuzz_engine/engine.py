@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import base64
+import os
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable
 
+from .asan import is_resource_class
 from .build_probe import probe_target_build
 from .campaign_audit import audit_campaign_fidelity
 from .checkpoints import prepare_campaign_checkpoint
@@ -12,12 +14,12 @@ from .completion_audit import audit_campaign_completion
 from .concolic import plan_concolic_branches
 from .crash_intake import collect_crash_import
 from .corpus import collect_corpus_import
-from .dedupe import classify_finding_candidate
+from .dedupe import classify_finding_candidate, finding_signature
 from .dictionary import generate_dictionary_from_source
 from .discovery import discover_local_target
 from .execution import run_harness_artifact
 from .fidelity import discover_reference_benchmarks, load_target_profile, resolve_reference_root, validate_reference_fixtures
-from .finding_lifecycle import audit_finding_lifecycle
+from .finding_lifecycle import audit_finding_lifecycle, event_is_verified, verification_events
 from .fuzzing import build_fuzz_candidates, extract_coverage_features, summarize_harness_run
 from .full_campaign import run_owned_local_full_campaign
 from .gc import run_campaign_gc
@@ -44,6 +46,10 @@ from .campaign_rounds import run_campaign_rounds
 from .concolic_sync import run_corpus_sync
 from .container_build import build_target
 from .scaffold import scaffold_target, select_targets
+from .seedgen import run_seedgen
+from .sink_coverage import sink_coverage
+from .valgrind_replay import valgrind_sweep
+from .sink_scan import run_sink_scan
 from .state import EngineState
 from .workspace import workspace_init
 from .export import (
@@ -64,6 +70,27 @@ from agentic_fuzz_full.runtime import (
 
 
 ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
+
+# Event types the engine emits as lifecycle/verification evidence. The
+# event_append tool refuses them so a caller cannot forge the evidence the
+# finding_record verification gate and the lifecycle audit rely on.
+RESERVED_EVENT_TYPES = frozenset(
+    {
+        "finding_verified",
+        "finding_recorded",
+        "finding_classified",
+        "finding_graded",
+        "finding_record_rejected",
+        "finding_dedupe",
+        "finding_lifecycle_audit",
+        "harness_run",
+        "crash_import",
+        "campaign_checkpoint_recorded",
+        "artifact_put",
+        "known_crash_suppressed",
+        "sink_status_changed",
+    }
+)
 
 
 class AgenticFuzzEngine:
@@ -106,7 +133,7 @@ class AgenticFuzzEngine:
             ),
             _tool("campaign_checkpoint_list", "List the durable phase handoff checkpoint ledger for a campaign.", {"run_id": "string"}),
             _tool("campaign_fidelity_audit", "Audit campaign coverage against benchmark fixtures and report missing parity evidence.", {"run_id": "string", "project": "string", "include_disabled": "boolean"}),
-            _tool("campaign_report", "Generate durable Markdown and JSON campaign report artifacts from verified deduped findings.", {"run_id": "string", "project": "string", "artifact_prefix": "string", "include_disabled": "boolean"}),
+            _tool("campaign_report", "Generate durable Markdown and JSON campaign report artifacts from verified deduped findings.", {"run_id": "string", "project": "string", "artifact_prefix": "string", "include_disabled": "boolean", "across_runs": "boolean"}),
             _tool(
                 "campaign_completion_audit",
                 "Run the final completion gate across parity, no-runtime guardrails, fixture validation, phase coverage, fidelity, and report artifacts.",
@@ -218,7 +245,16 @@ class AgenticFuzzEngine:
                 },
             ),
             _tool("finding_record", "Record a sanitizer finding and compute its dedupe signature.", {}),
-            _tool("finding_dedupe", "Group campaign findings by dedupe signature.", {"run_id": "string"}),
+            _tool(
+                "finding_dedupe",
+                "Group campaign findings by dedupe signature (per run, or --across-runs per target incl. GC archives).",
+                {"run_id": "string", "across_runs": "boolean", "target": "string"},
+            ),
+            _tool(
+                "findings_index",
+                "Query the durable workspace-level findings index that survives run-dir retention pruning.",
+                {"run_id": "string", "target": "string", "finding_id": "string", "event": "string", "raw": "boolean"},
+            ),
             _tool("finding_lifecycle_audit", "Audit recorded findings for artifact, verification, classification, and dedupe evidence.", {"run_id": "string"}),
             _tool(
                 "finding_grade",
@@ -362,7 +398,7 @@ class AgenticFuzzEngine:
             ),
             _tool(
                 "target_generate",
-                "Generate a target's harness + build recipe from a workspace generator spec (type_enum / direct_call / symbolic_string); emit an authoring workorder when generation or validation falls short.",
+                "Generate a target's harness + build recipe from a workspace generator spec (type_enum / direct_call / symbolic_string / sequence); emit an authoring workorder when generation or validation falls short.",
                 {
                     "name": "string",
                     "spec": "string",
@@ -395,9 +431,74 @@ class AgenticFuzzEngine:
                 {"target": "string", "workspace_root": "string"},
             ),
             _tool(
+                "sink_scan",
+                "Deterministic source-tree scan producing the sinks JSONL (fuzzable entry points + dangerous call sites, tagged by module) from nothing but the code.",
+                {"source_root": "string", "out": "string", "max_files": "integer", "max_rows_per_module": "integer", "workspace_root": "string"},
+            ),
+            _tool(
+                "sink_coverage",
+                "Coverage-vs-sink frontier: replay the corpus under -runs=0 -print_coverage=1 and report which dangerous sinks were never executed, ranked write/exec-first.",
+                {"target": "string", "sinks_jsonl": "string", "timeout_seconds": "number", "top": "integer", "workspace_root": "string"},
+            ),
+            _tool(
+                "valgrind_sweep",
+                "Replay corpus/PoV inputs through an uninstrumented replay command under valgrind memcheck; write-class oracle for closed-source binaries, hits ranked Invalid-WRITE first.",
+                {"target": "string", "command": "array", "corpus_dir": "string", "max_inputs": "integer", "per_input_timeout": "number", "max_seconds": "number", "top": "integer", "workspace_root": "string"},
+            ),
+            _tool(
                 "candidate_ledger",
                 "Candidate lifecycle ledger: sync from sink inventory + generate.json, list current states/counts, or append a manual status event.",
-                {"action": "string", "name": "string", "status": "string", "note": "string", "sinks_jsonl": "string", "top": "integer", "workspace_root": "string"},
+                {"action": "string", "name": "string", "status": "string", "note": "string", "sinks_jsonl": "string", "top": "integer", "entry_class": "string", "workspace_root": "string"},
+            ),
+            _tool(
+                "fleet_jobs",
+                "Fleet job ledger over data/jobs.jsonl: sync derives typed authoring jobs from workspace state (idempotent), list/report fold current states, update appends worker transitions with auto requeue/park, predicate judges a finished job's output deterministically.",
+                {"action": "string", "job_id": "string", "state": "string", "types": "array", "note": "string", "failure_class": "string", "fields_json": "string", "consume_attempt": "boolean", "workspace_root": "string"},
+            ),
+            _tool(
+                "seedgen_run",
+                "Execute an authored generate(rnd)->bytes or mutate(rnd, seed)->bytes seed script in a bounded subprocess and merge deduped blobs into the target corpus with provenance.",
+                {"target": "string", "script": "string", "count": "integer", "max_seconds": "number", "max_blob_bytes": "integer", "memory_mb": "integer", "base_seed": "integer", "mode": "string", "sample_max": "integer", "workspace_root": "string"},
+            ),
+            _tool(
+                "spec_probe",
+                "Bounded compile-and-fix loop over a target's build spec: classify clang errors, auto-add unique include dirs/sources/syslibs, leave ambiguous residue in work/<t>/probe-state.json.",
+                {"target": "string", "spec": "string", "scan_root": "string", "max_iterations": "integer", "workspace_root": "string"},
+            ),
+            _tool(
+                "flag_scan",
+                "Inventory gflags/absl flag definitions over a target's build-input closure into work/<t>/flags-inventory.json.",
+                {"target": "string", "source_dir": "string", "workspace_root": "string"},
+            ),
+            _tool(
+                "flag_prelude",
+                "Render targets/c/<t>/flag_profile.inc from .localfuzz/flags.json profiles (no-op include when absent).",
+                {"target": "string", "workspace_root": "string"},
+            ),
+            _tool(
+                "finding_reachability",
+                "Attach reachability evidence to a finding: caller scan, flag-gate scan, declared service facts, and an operator verdict.",
+                {"run_id": "string", "finding_id": "string", "entry_symbol": "string", "source_dir": "string", "verdict": "string", "note": "string", "workspace_root": "string"},
+            ),
+            _tool(
+                "finding_impact",
+                "Per-finding impact pass: ASAN primitive, UBSan wrap replay, valgrind write oracle, and advisory adjacency leads.",
+                {"run_id": "string", "finding_id": "string", "source_dir": "string", "workspace_root": "string", "timeout_seconds": "number"},
+            ),
+            _tool(
+                "directed_build",
+                "Build a directed fuzzer for an open queue task: same recipe plus -fsanitize-coverage-allowlist on the sink's file, output bin/<t>/fuzzer-directed-<hash>, recorded on the task for the round loop.",
+                {"target": "string", "sink": "string", "also_files": "array", "timeout_seconds": "number", "workspace_root": "string"},
+            ),
+            _tool(
+                "directed_queue",
+                "Directed-fuzzing task scheduler over data/directed-queue.json: list open tasks, sync uncovered write/exec sinks from the inventory, flag an agent-priority sink, or complete/drop a task.",
+                {"action": "string", "target": "string", "sink": "string", "priority": "integer", "note": "string", "state": "string", "sinks_jsonl": "string", "workspace_root": "string"},
+            ),
+            _tool(
+                "codec_run",
+                "Execute an authored decode(bytes)->dict harness codec in a bounded subprocess: validate it against the live corpus (parse rate, round-trip, qualifying probe replay) or decode PoV artifacts into structured dicts with hex fallback.",
+                {"target": "string", "mode": "string", "script": "string", "paths": "array", "max_samples": "integer", "qualify_functions": "array", "timeout_seconds": "number", "memory_mb": "integer", "workspace_root": "string", "run_id": "string"},
             ),
             _tool(
                 "campaign_round_run",
@@ -622,6 +723,7 @@ class AgenticFuzzEngine:
             "concolic_plan": self._concolic_plan,
             "finding_record": self._finding_record,
             "finding_dedupe": self._finding_dedupe,
+            "findings_index": self._findings_index,
             "finding_lifecycle_audit": self._finding_lifecycle_audit,
             "finding_grade": self._finding_grade,
             "finding_classify": self._finding_classify,
@@ -644,9 +746,22 @@ class AgenticFuzzEngine:
             "symbolic_corpus_sync": self._symbolic_corpus_sync,
             "campaign_round_run": self._campaign_round_run,
             "plateau_status": self._plateau_status,
+            "sink_scan": self._sink_scan,
+            "sink_coverage": self._sink_coverage,
+            "valgrind_sweep": self._valgrind_sweep,
+            "seedgen_run": self._seedgen_run,
+            "codec_run": self._codec_run,
+            "directed_queue": self._directed_queue,
+            "directed_build": self._directed_build,
+            "finding_impact": self._finding_impact,
+            "finding_reachability": self._finding_reachability,
+            "flag_scan": self._flag_scan,
+            "spec_probe": self._spec_probe,
+            "flag_prelude": self._flag_prelude,
             "campaign_gc": self._campaign_gc,
             "klee_pack_gen": self._klee_pack_gen,
             "candidate_ledger": self._candidate_ledger,
+            "fleet_jobs": self._fleet_jobs,
             "fuzz_ensemble_run": self._fuzz_ensemble_run,
             "symbolic_worker_run": self._symbolic_worker_run,
             "sarif_reachability_run": self._sarif_reachability_run,
@@ -808,7 +923,14 @@ class AgenticFuzzEngine:
                 events=self.state.event_list(run_id),
             ),
             fidelity_audit=fidelity,
-            dedupe=self.state.finding_dedupe(run_id),
+            dedupe=(
+                self.state.finding_dedupe_across(
+                    str(self.state.campaign_status(run_id)["campaign"].get("target") or "")
+                )
+                if bool(args.get("across_runs"))
+                else self.state.finding_dedupe(run_id)
+            ),
+            reachability_gate=self._reachability_gate_input(),
         )
         artifact_prefix = str(args.get("artifact_prefix") or f"reports/{run_id}")
         markdown_artifact = self.state.artifact_put(run_id, f"{artifact_prefix}/REPORT.md", built["markdown_content_b64"])
@@ -1027,9 +1149,20 @@ class AgenticFuzzEngine:
 
     def _event_append(self, args: dict[str, Any]) -> dict[str, Any]:
         payload = args.get("payload")
+        event_type = _required(args, "event_type")
+        # Engine-internal event types are verification/lifecycle evidence; a
+        # caller forging one would defeat the constructive-verification gate
+        # on finding_record and the lifecycle audit.
+        if event_type in RESERVED_EVENT_TYPES:
+            return {
+                "ok": False,
+                "blockers": [
+                    f"event type '{event_type}' is engine-reserved and can only be emitted by engine tools"
+                ],
+            }
         return self.state.event_append(
             _required(args, "run_id"),
-            _required(args, "event_type"),
+            event_type,
             payload if isinstance(payload, dict) else {},
         )
 
@@ -1100,6 +1233,148 @@ class AgenticFuzzEngine:
             target=args.get("target") or None,
         )
 
+    def _sink_scan(self, args: dict[str, Any]) -> dict[str, Any]:
+        merge_inputs = args.get("merge_jsonl")
+        if isinstance(merge_inputs, list) and merge_inputs:
+            from .sink_scan import merge_sink_jsonl
+
+            out = args.get("out")
+            if not out:
+                raise ValueError("--out is required with --merge-jsonl")
+            return merge_sink_jsonl(inputs=[str(item) for item in merge_inputs], out_path=out)
+        return run_sink_scan(
+            source_root=args.get("source_root") or None,
+            out_path=args.get("out") or None,
+            workspace_root=args.get("workspace_root") or None,
+            max_files=int(args.get("max_files", 20000)),
+            max_rows_per_module=int(args.get("max_rows_per_module", 400)),
+            env=dict(os.environ),
+        )
+
+    def _sink_coverage(self, args: dict[str, Any]) -> dict[str, Any]:
+        return sink_coverage(
+            target=_required(args, "target"),
+            sinks_jsonl=args.get("sinks_jsonl") or None,
+            workspace_root=args.get("workspace_root") or None,
+            timeout_seconds=float(args.get("timeout_seconds", 120)),
+            top=int(args.get("top", 200)),
+            max_inputs=(
+                int(args["max_inputs"]) if args.get("max_inputs") is not None else None
+            ),
+        )
+
+    def _valgrind_sweep(self, args: dict[str, Any]) -> dict[str, Any]:
+        command = args.get("command")
+        if isinstance(command, str):
+            command = command.split()
+        return valgrind_sweep(
+            target=_required(args, "target"),
+            command=list(command) if command else None,
+            corpus_dir=args.get("corpus_dir") or None,
+            max_inputs=int(args.get("max_inputs", 2000)),
+            per_input_timeout=float(args.get("per_input_timeout", 10.0)),
+            max_seconds=float(args.get("max_seconds", 900.0)),
+            top=int(args.get("top", 50)),
+            workspace_root=args.get("workspace_root") or None,
+        )
+
+    def _seedgen_run(self, args: dict[str, Any]) -> dict[str, Any]:
+        return run_seedgen(
+            target=_required(args, "target"),
+            script_path=_required(args, "script"),
+            count=int(args.get("count", 256)),
+            max_seconds=float(args.get("max_seconds", 60.0)),
+            max_blob_bytes=int(args.get("max_blob_bytes", 1024 * 1024)),
+            memory_mb=int(args.get("memory_mb", 1024)),
+            base_seed=int(args.get("base_seed", 0)),
+            mode=str(args.get("mode") or "generate"),
+            sample_max=int(args.get("sample_max", 64)),
+            workspace_root=args.get("workspace_root") or None,
+            env=dict(os.environ),
+        )
+
+    def _codec_run(self, args: dict[str, Any]) -> dict[str, Any]:
+        from .codec import run_codec
+        from .workspace import load_policy
+
+        workspace_root = args.get("workspace_root") or None
+        codec_policy = load_policy(workspace_root).get("codec", {})
+        result = run_codec(
+            target=_required(args, "target"),
+            mode=str(args.get("mode") or "validate"),
+            script_path=args.get("script") or None,
+            paths=list(args.get("paths") or []) or None,
+            max_samples=int(args.get("max_samples", codec_policy.get("validate_samples", 64))),
+            qualify_functions=list(args.get("qualify_functions") or []) or None,
+            min_parse_rate=float(codec_policy.get("min_parse_rate", 0.9)),
+            require_roundtrip=bool(codec_policy.get("require_roundtrip", False)),
+            qualify_default_from_sinks=bool(codec_policy.get("qualify_default_from_sinks", True)),
+            timeout_seconds=float(args.get("timeout_seconds", codec_policy.get("max_seconds", 60))),
+            memory_mb=int(args.get("memory_mb", codec_policy.get("memory_mb", 1024))),
+            max_decode_bytes=int(codec_policy.get("max_decode_bytes", 65536)),
+            workspace_root=workspace_root,
+            env=dict(os.environ),
+        )
+        run_id = args.get("run_id")
+        if run_id and result.get("mode") == "validate":
+            self.state.event_append(
+                str(run_id),
+                "codec_validated",
+                {
+                    "target": result.get("target"),
+                    "validated": result.get("validated"),
+                    "parse_rate": result.get("parse_rate"),
+                    "qualifying": (result.get("qualifying") or {}).get("qualified"),
+                },
+            )
+        return result
+
+    def _directed_queue(self, args: dict[str, Any]) -> dict[str, Any]:
+        from .directed import complete_task, flag_task, queue_summary, sync_queue
+        from .workspace import resolve_workspace_root
+
+        root = resolve_workspace_root(args.get("workspace_root") or None)
+        action = str(args.get("action") or "list")
+        if action == "list":
+            return queue_summary(root=root, target=args.get("target") or None)
+        if action == "sync":
+            return sync_queue(
+                root=root,
+                name=_required(args, "target"),
+                sinks_jsonl=args.get("sinks_jsonl") or None,
+            )
+        if action == "flag":
+            return flag_task(
+                root=root,
+                target=_required(args, "target"),
+                sink=_required(args, "sink"),
+                priority=int(args.get("priority", 100)),
+                note=args.get("note") or None,
+            )
+        if action == "complete":
+            return complete_task(
+                root=root,
+                target=_required(args, "target"),
+                sink=_required(args, "sink"),
+                state=str(args.get("state") or "done"),
+                note=args.get("note") or None,
+            )
+        raise ValueError("directed_queue action must be list, sync, flag, or complete")
+
+    def _directed_build(self, args: dict[str, Any]) -> dict[str, Any]:
+        from .directed import directed_build
+        from .workspace import resolve_workspace_root
+
+        root = resolve_workspace_root(args.get("workspace_root") or None)
+        also = args.get("also_files")
+        return directed_build(
+            root=root,
+            name=str(_required(args, "target")).removeprefix("localfuzz/c/"),
+            sink=args.get("sink") or None,
+            also_files=[str(item) for item in also] if isinstance(also, list) else None,
+            timeout_seconds=float(args.get("timeout_seconds", 900)),
+        )
+
     def _candidate_ledger(self, args: dict[str, Any]) -> dict[str, Any]:
         action = str(args.get("action") or "list")
         workspace_root = args.get("workspace_root") or None
@@ -1117,8 +1392,57 @@ class AgenticFuzzEngine:
                 workspace_root=workspace_root,
             )
         if action == "list":
-            return candidates_list(workspace_root=workspace_root)
+            return candidates_list(
+                workspace_root=workspace_root,
+                entry_class=args.get("entry_class") or None,
+            )
         raise ValueError("candidate_ledger action must be sync, list, or update")
+
+    def _fleet_jobs(self, args: dict[str, Any]) -> dict[str, Any]:
+        import json as json_module
+
+        from .jobs import jobs_list, jobs_report, jobs_update, sync_jobs
+
+        action = str(args.get("action") or "list")
+        workspace_root = args.get("workspace_root") or None
+        if action == "sync":
+            types = args.get("types")
+            return sync_jobs(
+                workspace_root=workspace_root,
+                types=[str(item) for item in types] if isinstance(types, list) and types else None,
+            )
+        if action == "list":
+            types = args.get("types")
+            return jobs_list(
+                workspace_root=workspace_root,
+                state=args.get("state") or None,
+                job_type=str(types[0]) if isinstance(types, list) and types else None,
+            )
+        if action == "update":
+            raw = args.get("fields_json")
+            fields = json_module.loads(raw) if isinstance(raw, str) and raw.strip() else None
+            if fields is not None and not isinstance(fields, dict):
+                raise ValueError("fields_json must decode to an object")
+            return jobs_update(
+                job_id=_required(args, "job_id"),
+                state=_required(args, "state"),
+                note=args.get("note") or None,
+                failure_class=args.get("failure_class") or None,
+                fields=fields,
+                consume_attempt=bool(args.get("consume_attempt", True)),
+                workspace_root=workspace_root,
+            )
+        if action == "report":
+            return jobs_report(workspace_root=workspace_root)
+        if action == "predicate":
+            from .job_predicates import evaluate_job
+
+            return evaluate_job(
+                job_id=_required(args, "job_id"),
+                workspace_root=workspace_root,
+                engine=self,
+            )
+        raise ValueError("fleet_jobs action must be sync, list, update, report, or predicate")
 
     def _campaign_round_run(self, args: dict[str, Any]) -> dict[str, Any]:
         return run_campaign_rounds(
@@ -1512,6 +1836,12 @@ class AgenticFuzzEngine:
             case["run"] = run
             case["status"] = "verified" if run["verified"] else "failed"
             observed_token = expected_error_token or run.get("observed_error_token")
+            # Resource exhaustion (OOM / alloc-size-too-big / timeout) with no
+            # corruption verdict is campaign noise, never a promotable finding.
+            if run["verified"] and is_resource_class(str(run.get("crash_output") or "")):
+                case["status"] = "resource-noise"
+                cases.append(case)
+                continue
             if run["verified"] and observed_token:
                 candidate = {
                     "target": target,
@@ -1546,6 +1876,7 @@ class AgenticFuzzEngine:
             "imported": len(cases),
             "verified": sum(1 for case in cases if case["status"] == "verified"),
             "failed": sum(1 for case in cases if case["status"] == "failed"),
+            "resource_noise": sum(1 for case in cases if case["status"] == "resource-noise"),
             "blocked": len(blocked),
             "findings_recorded": len(findings),
             "skipped": collected["skipped"],
@@ -1720,19 +2051,127 @@ class AgenticFuzzEngine:
         return result
 
     def _finding_record(self, args: dict[str, Any]) -> dict[str, Any]:
+        run_id = _required(args, "run_id")
+        target = _required(args, "target")
+        harness = _required(args, "harness")
+        sanitizer = str(args.get("sanitizer") or "address")
+        error_token = _required(args, "error_token")
+        crash_output = str(args.get("crash_output") or args.get("error_token") or "")
+        poc_artifact = args.get("poc_artifact") or None
+        verified = bool(args.get("verified")) if args.get("verified") is not None else None
+        # Constructive verification: a caller may not assert verified=true —
+        # the engine must have observed the crash itself (harness_run,
+        # finding_grade, crash_import). Verified claims without matching
+        # engine-emitted evidence are rejected at record time instead of
+        # surfacing later in the lifecycle audit.
+        if verified is True:
+            rejection = self._verified_record_rejection(
+                run_id,
+                target=target,
+                harness=harness,
+                sanitizer=sanitizer,
+                error_token=error_token,
+                crash_output=crash_output,
+                poc_artifact=poc_artifact,
+            )
+            if rejection is not None:
+                return rejection
         return self.state.finding_record(
-            _required(args, "run_id"),
-            target=_required(args, "target"),
-            harness=_required(args, "harness"),
-            sanitizer=str(args.get("sanitizer") or "address"),
-            error_token=_required(args, "error_token"),
-            crash_output=str(args.get("crash_output") or args.get("error_token") or ""),
-            poc_artifact=args.get("poc_artifact") or None,
+            run_id,
+            target=target,
+            harness=harness,
+            sanitizer=sanitizer,
+            error_token=error_token,
+            crash_output=crash_output,
+            poc_artifact=poc_artifact,
             reproductions=int(args.get("reproductions")) if args.get("reproductions") not in (None, "") else None,
-            verified=bool(args.get("verified")) if args.get("verified") is not None else None,
+            verified=verified,
         )
 
+    def _verified_record_rejection(
+        self,
+        run_id: str,
+        *,
+        target: str,
+        harness: str,
+        sanitizer: str,
+        error_token: str,
+        crash_output: str,
+        poc_artifact: str | None,
+    ) -> dict[str, Any] | None:
+        """None when engine-emitted verification evidence exists; otherwise a
+        rejection payload (and a durable finding_record_rejected event)."""
+        signature = finding_signature(
+            target=target,
+            harness=harness,
+            sanitizer=sanitizer,
+            error_token=error_token,
+            crash_output=crash_output,
+        )
+        blockers: list[str] = []
+        if not poc_artifact:
+            blockers.append("verified findings require a stored PoV artifact (poc_artifact)")
+        else:
+            evidence = [
+                event
+                for event in verification_events(self.state.event_list(run_id))
+                if event_is_verified(event) and self._verification_event_matches(
+                    event, signature=signature, poc_artifact=poc_artifact, target=target, harness=harness
+                )
+            ]
+            if not evidence:
+                blockers.append(
+                    "verified=true requires engine-emitted verification evidence for this PoV; "
+                    "use harness_run or finding_grade with record_finding=true, or crash_import"
+                )
+        if not blockers:
+            return None
+        self.state.event_append(
+            run_id,
+            "finding_record_rejected",
+            {
+                "signature": signature,
+                "target": target,
+                "harness": harness,
+                "poc_artifact": poc_artifact,
+                "blockers": blockers,
+            },
+        )
+        return {
+            "ok": False,
+            "recorded": False,
+            "run_id": run_id,
+            "signature": signature,
+            "blockers": blockers,
+        }
+
+    @staticmethod
+    def _verification_event_matches(
+        event: dict[str, Any],
+        *,
+        signature: str,
+        poc_artifact: str,
+        target: str,
+        harness: str,
+    ) -> bool:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        event_artifact = payload.get("poc_artifact") or payload.get("artifact")
+        if event_artifact != poc_artifact:
+            return False
+        if payload.get("signature") and payload.get("signature") != signature:
+            return False
+        if payload.get("target") and payload.get("target") != target:
+            return False
+        if payload.get("harness") and payload.get("harness") != harness:
+            return False
+        return True
+
     def _finding_dedupe(self, args: dict[str, Any]) -> dict[str, Any]:
+        if bool(args.get("across_runs")):
+            target = args.get("target") if isinstance(args.get("target"), str) and args.get("target") else None
+            if not target:
+                raise ValueError("finding_dedupe across_runs requires target")
+            return self.state.finding_dedupe_across(target)
         run_id = _required(args, "run_id")
         result = self.state.finding_dedupe(run_id)
         self.state.event_append(
@@ -1748,6 +2187,33 @@ class AgenticFuzzEngine:
             },
         )
         return result
+
+    def _findings_index(self, args: dict[str, Any]) -> dict[str, Any]:
+        from .findings_index import fold_index, load_index
+
+        target = args.get("target") or None
+        if bool(args.get("raw")):
+            rows = load_index(
+                self.state.data_root,
+                run_id=args.get("run_id") or None,
+                target=target,
+                finding_id=args.get("finding_id") or None,
+                event=args.get("event") or None,
+            )
+            return {"mode": "findings-index", "raw": True, "rows": rows, "count": len(rows)}
+        # Fold first, filter after: lifecycle rows (impact/reachability/
+        # dedupe) carry only a finding_id, so a row-level target filter
+        # would drop them before they can attach to their finding.
+        rows = load_index(
+            self.state.data_root,
+            run_id=args.get("run_id") or None,
+            finding_id=args.get("finding_id") or None,
+            event=args.get("event") or None,
+        )
+        folded = fold_index(rows)
+        if target:
+            folded = [item for item in folded if item.get("target") == target]
+        return {"mode": "findings-index", "raw": False, "findings": folded, "count": len(folded)}
 
     def _finding_lifecycle_audit(self, args: dict[str, Any]) -> dict[str, Any]:
         run_id = _required(args, "run_id")
@@ -1905,7 +2371,130 @@ class AgenticFuzzEngine:
         finding = None
         if record and classification["verdict"] in {"NEW", "DUP_BETTER", "FIXTURE_REPLAY"}:
             finding = self.state.finding_record(run_id, **candidate)
+            self._auto_impact(run_id, finding)
         return {"classification": classification, "finding": finding}
+
+    def _auto_impact(self, run_id: str, finding: dict[str, Any] | None) -> None:
+        """Best-effort impact pass at intake when the optional binaries
+        exist; policy impact.auto gates it, failure never blocks recording."""
+        if not finding:
+            return
+        try:
+            from .impact import finding_impact
+            from .workspace import load_policy, resolve_workspace_root
+
+            root = resolve_workspace_root(None)
+            policy = load_policy(root).get("impact", {})
+            if not policy.get("auto", True):
+                return
+            finding_impact(
+                state=self.state,
+                run_id=run_id,
+                finding_id=str(finding["finding_id"]),
+                workspace_root=root,
+                replay_timeout_seconds=float(policy.get("replay_timeout_seconds", 60)),
+                lead_window=int(policy.get("lead_window", 60)),
+            )
+        except Exception:
+            return
+
+    def _spec_probe(self, args: dict[str, Any]) -> dict[str, Any]:
+        from .spec_probe import spec_probe
+        from .workspace import load_policy, resolve_workspace_root
+
+        root = resolve_workspace_root(args.get("workspace_root") or None)
+        policy = load_policy(root).get("spec_probe", {})
+        return spec_probe(
+            root=root,
+            name=str(_required(args, "target")).removeprefix("localfuzz/c/"),
+            spec=args.get("spec") or None,
+            scan_root=args.get("scan_root") or None,
+            max_iterations=int(args.get("max_iterations") or policy.get("max_iterations", 12)),
+            max_include_dirs=int(policy.get("max_include_dirs", 64)),
+            max_link_sources=int(policy.get("max_link_sources", 400)),
+            compile_timeout=float(policy.get("compile_timeout", 300)),
+            engine=self,
+        )
+
+    def _flag_scan(self, args: dict[str, Any]) -> dict[str, Any]:
+        from .flag_profiles import flag_scan
+        from .workspace import resolve_workspace_root
+
+        root = resolve_workspace_root(args.get("workspace_root") or None)
+        return flag_scan(
+            root=root,
+            name=str(_required(args, "target")).removeprefix("localfuzz/c/"),
+            source_dir=args.get("source_dir") or None,
+        )
+
+    def _flag_prelude(self, args: dict[str, Any]) -> dict[str, Any]:
+        from .flag_profiles import write_flag_prelude
+        from .workspace import resolve_workspace_root
+
+        root = resolve_workspace_root(args.get("workspace_root") or None)
+        return write_flag_prelude(
+            root=root,
+            name=str(_required(args, "target")).removeprefix("localfuzz/c/"),
+        )
+
+    def _reachability_gate_input(self) -> dict[str, Any]:
+        """Gate mode from policy plus the verdict-per-finding map from the
+        durable index, for build_campaign_report to enforce pre-render."""
+        from .findings_index import fold_index, load_index
+        from .workspace import load_policy, resolve_workspace_root
+
+        mode = "warn"
+        try:
+            mode = str(
+                load_policy(resolve_workspace_root(None)).get("report", {}).get("require_reachability", "warn")
+            )
+        except Exception:
+            pass
+        verdicts: dict[str, str] = {}
+        if mode in ("warn", "block"):
+            try:
+                for item in fold_index(load_index(self.state.data_root)):
+                    verdict = (item.get("reachability") or {}).get("verdict")
+                    if verdict:
+                        verdicts[str(item["finding_id"])] = str(verdict)
+            except Exception:
+                pass
+        return {"mode": mode, "verdicts": verdicts}
+
+    def _finding_reachability(self, args: dict[str, Any]) -> dict[str, Any]:
+        from .reachability import finding_reachability
+        from .workspace import load_policy, resolve_workspace_root
+
+        root = resolve_workspace_root(args.get("workspace_root") or None)
+        policy = load_policy(root).get("reachability", {})
+        return finding_reachability(
+            state=self.state,
+            run_id=_required(args, "run_id"),
+            finding_id=_required(args, "finding_id"),
+            entry_symbol=_required(args, "entry_symbol"),
+            workspace_root=root,
+            source_dir=args.get("source_dir") or None,
+            verdict=args.get("verdict") or None,
+            note=args.get("note") or None,
+            max_files=int(policy.get("max_files", 20000)),
+            timeout_seconds=float(policy.get("scan_timeout_seconds", 120)),
+        )
+
+    def _finding_impact(self, args: dict[str, Any]) -> dict[str, Any]:
+        from .impact import finding_impact
+        from .workspace import load_policy, resolve_workspace_root
+
+        root = resolve_workspace_root(args.get("workspace_root") or None)
+        policy = load_policy(root).get("impact", {})
+        return finding_impact(
+            state=self.state,
+            run_id=_required(args, "run_id"),
+            finding_id=_required(args, "finding_id"),
+            workspace_root=root,
+            source_dir=args.get("source_dir") or None,
+            replay_timeout_seconds=float(args.get("timeout_seconds") or policy.get("replay_timeout_seconds", 60)),
+            lead_window=int(policy.get("lead_window", 60)),
+        )
 
     def _harness_run(self, args: dict[str, Any]) -> dict[str, Any]:
         run_id = _required(args, "run_id")

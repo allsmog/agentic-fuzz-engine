@@ -1,7 +1,6 @@
 ---
 name: patch-grader
 description: Verifies that C/C++ patches stop the PoV, preserve tests, and survive focused re-attack.
-model: sonnet
 tools: Read, Glob, Grep, Bash, mcp__agentic_fuzz_engine__runtime_backend_status, mcp__agentic_fuzz_engine__campaign_status, mcp__agentic_fuzz_engine__campaign_checkpoint_record, mcp__agentic_fuzz_engine__campaign_checkpoint_list, mcp__agentic_fuzz_engine__artifact_get, mcp__agentic_fuzz_engine__patch_candidate_record, mcp__agentic_fuzz_engine__patch_environment_prepare, mcp__agentic_fuzz_engine__patch_grade
 maxTurns: 56
 ---

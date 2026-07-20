@@ -109,7 +109,8 @@ class PlateauStatusTests(unittest.TestCase):
         self.assertEqual(verdicts["newbie"], "insufficient-data")
         self.assertEqual(result["plateaued"], ["flatliner"])
         flat = next(item for item in result["targets"] if item["target"] == "flatliner")
-        self.assertEqual(flat["next_rung"], "dictionary")
+        # "frontier" is the first ladder rung since the sinkpoint loop landed
+        self.assertEqual(flat["next_rung"], "frontier")
 
     def test_falls_back_to_corpus_size_and_respects_tried_rungs(self) -> None:
         from agentic_fuzz_engine.campaign_metrics import ledger_append, plateau_status
@@ -132,7 +133,8 @@ class PlateauStatusTests(unittest.TestCase):
         self.assertEqual(item["metric_used"], "corpus_size")
         self.assertTrue(item["verdict"].startswith("plateaued"))
         self.assertEqual(item["rungs_tried"], ["dictionary"])
-        self.assertEqual(item["next_rung"], "structured-seeds")
+        # dictionary tried; frontier (untried, earlier in the ladder) comes next
+        self.assertEqual(item["next_rung"], "frontier")
 
 
 class RoundLoopIntegrationTests(unittest.TestCase):

@@ -104,7 +104,7 @@ Run `fuzz_campaign` with a fixed iteration budget, expected sanitizer token, exp
 
 ### Phase 4: Evidence Gate
 
-A crash becomes reportable only after `finding_grade` or `harness_run` proves the expected sanitizer token, at least 2/3 reproduction, and preferably 3/3 reproduction. Run `pov_minimize` when the PoV can shrink without losing signal identity. Run `finding_classify` before `finding_record`; duplicates are events unless `DUP_BETTER` replaces the representative. Run `finding_lifecycle_audit` or `finding-lifecycle-audit --strict` after dedupe to prove artifact, verification, classification, and dedupe evidence. Record `grading` and `dedupe` checkpoints before patch or report routing.
+A crash becomes reportable only after `finding_grade` or `harness_run` proves the expected sanitizer token, at least 2/3 reproduction, and preferably 3/3 reproduction. Run `pov_minimize` when the PoV can shrink without losing signal identity. Record findings through `finding_grade`/`harness_run` with `record_finding=true` (or `crash_import`) — the engine classifies, verifies, and records atomically; a direct `finding_record` asserting `verified=true` is rejected unless engine-emitted verification evidence for that PoV already exists. Duplicates are events unless `DUP_BETTER` replaces the representative. Run `finding_lifecycle_audit` or `finding-lifecycle-audit --strict` after dedupe to prove artifact, verification, classification, and dedupe evidence. Record `grading` and `dedupe` checkpoints before patch or report routing.
 
 ### Phase 5: Patch and Report
 

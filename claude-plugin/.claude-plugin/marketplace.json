@@ -1,0 +1,13 @@
+{
+  "name": "agentic-fuzz-local",
+  "owner": {
+    "name": "Agentic Fuzz Engine"
+  },
+  "plugins": [
+    {
+      "name": "agentic-fuzz",
+      "source": "./agentic-fuzz-engine",
+      "description": "Agentic C/C++ fuzzing engine: workspace campaigns, plateau detection, candidate ledger, corpus GC, KLEE/SymCC lanes."
+    }
+  ]
+}

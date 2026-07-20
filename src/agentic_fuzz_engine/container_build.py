@@ -32,6 +32,7 @@ def build_target(
     only_steps: list[str] | None = None,
     timeout_seconds: int | float = 900,
     env: Mapping[str, str] | None = None,
+    config_override: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     environment = dict(os.environ if env is None else env)
     timeout = min(float(timeout_seconds), MAX_RUNTIME_TIMEOUT_SECONDS)
@@ -49,10 +50,12 @@ def build_target(
     build_config_path = target_dir / BUILD_CONFIG_RELATIVE
     if not target_dir.is_dir():
         raise FileNotFoundError(f"target dir not found (run target-scaffold first): {target_dir}")
-    if not build_config_path.is_file():
+    if config_override is None and not build_config_path.is_file():
         raise FileNotFoundError(f"build config not found: {build_config_path}")
 
-    config = json.loads(build_config_path.read_text(encoding="utf-8"))
+    config = dict(config_override) if config_override is not None else json.loads(
+        build_config_path.read_text(encoding="utf-8")
+    )
     steps = config.get("steps", [])
     if not isinstance(steps, list) or not steps:
         raise ValueError(f"build config has no steps: {build_config_path}")
@@ -107,8 +110,22 @@ def build_target(
         for entry in sorted(bin_dir.iterdir())
         if entry.is_file()
     ]
+    manifest: dict[str, Any] | None = None
+    if not blockers and config_override is None:
+        # Successful build: record the input-closure hash manifest so the
+        # round loop can detect staleness proactively (see staleness.py).
+        from .staleness import write_manifest
+
+        manifest = write_manifest(
+            root=root,
+            name=name,
+            target_dir=target_dir,
+            build_config=config,
+            placeholders=placeholders,
+        )
     return {
         "ok": not blockers,
+        "build_manifest": manifest,
         "mode": "target-build",
         "project": f"localfuzz/c/{name}",
         "target_dir": str(target_dir),

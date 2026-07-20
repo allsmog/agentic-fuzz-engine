@@ -87,15 +87,17 @@ class AgenticFuzzMcpServer:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Agentic Fuzz Engine MCP stdio server")
-    parser.add_argument("--data-root", default=os.environ.get("CLAUDE_PLUGIN_DATA", "runs/agentic-fuzz-engine"))
+    parser.add_argument("--data-root", default=None)
     parser.add_argument(
         "--reference-root",
         default=os.environ.get("AGENTIC_FUZZ_REFERENCE_ROOT"),
     )
     parser.add_argument("--audit-root", action="append", default=[])
     args = parser.parse_args(argv)
+    from .workspace import default_data_root
+
     server = AgenticFuzzMcpServer(
-        data_root=args.data_root,
+        data_root=args.data_root or default_data_root(),
         reference_root=args.reference_root,
         audit_roots=tuple(args.audit_root),
     )

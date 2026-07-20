@@ -197,6 +197,30 @@ ENGINE_PARITY_REQUIREMENTS: tuple[ParityRequirement, ...] = (
         plugin_files=("scripts/runtime-guard.py",),
         prompt_terms=("runtime-guard-audit", "engine-parity-audit", "engine_parity_audit"),
     ),
+    ParityRequirement(
+        name="adaptive_scheduling_and_codec",
+        description="Per-seed weighted scheduling, SymCC solution crossover, cached harness codecs, and the directed-fuzzing task queue steer plateaued campaigns.",
+        tools=("codec_run", "directed_queue"),
+        agents=(
+            "planner.md",
+            "input-generator.md",
+            "fuzz-finder.md",
+            "crash-grader.md",
+            "concolic-generator.md",
+            "dictionary-generator.md",
+            "monitor.md",
+        ),
+        engine_files=("seed_weights.py", "symcc_crossover.py", "codec.py", "directed.py"),
+        prompt_terms=(
+            "seed-weights.json",
+            "bits.json",
+            "symcc-harvest",
+            "symx-",
+            "codec-status.json",
+            "directed-queue",
+            "directed-allowlist",
+        ),
+    ),
 )
 
 

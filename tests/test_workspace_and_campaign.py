@@ -329,6 +329,163 @@ class CampaignRoundsTests(unittest.TestCase):
         self.assertIn("skipped", round_one["symcc_sync"])
         self.assertEqual(round_one["intake"]["findings_recorded"], 1)
 
+    def test_round_run_imports_authored_target_seeds(self) -> None:
+        from agentic_fuzz_engine.campaign_rounds import run_campaign_rounds
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp) / "ws"
+            bin_dir = ws / "bin" / "demo"
+            bin_dir.mkdir(parents=True)
+            fuzzer = bin_dir / "fuzzer"
+            fuzzer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fuzzer.chmod(0o755)
+            authored = ws / "targets" / "c" / "demo" / "seeds"
+            authored.mkdir(parents=True)
+            (authored / "v1-plain.bin").write_bytes(b"valid-seed-one")
+            (authored / "v2-refs.bin").write_bytes(b"valid-seed-two")
+            crash_dir = Path(tmp) / "crashes"
+            crash_dir.mkdir()
+            (crash_dir / "crash-1").write_bytes(b"boom")
+            engine = _StubEngine(crash_dir)
+
+            result = run_campaign_rounds(
+                engine,
+                project="localfuzz/c/demo",
+                rounds=1,
+                fuzz_seconds=5,
+                workspace_root=ws,
+                env=dict(os.environ),
+            )
+
+            self.assertTrue(result["ok"], result["blockers"])
+            self.assertEqual(result["seeds_imported"], 2)
+            corpus_blobs = {
+                entry.read_bytes()
+                for entry in (ws / "work" / "demo" / "seeds").iterdir()
+            }
+            self.assertIn(b"valid-seed-one", corpus_blobs)
+            self.assertIn(b"valid-seed-two", corpus_blobs)
+
+            # Re-run is idempotent: content-addressed names dedupe imports.
+            result = run_campaign_rounds(
+                engine,
+                project="localfuzz/c/demo",
+                rounds=1,
+                fuzz_seconds=5,
+                workspace_root=ws,
+                env=dict(os.environ),
+            )
+            self.assertEqual(result["seeds_imported"], 0)
+
+    def test_round_run_intake_skips_resource_class_artifacts(self) -> None:
+        from agentic_fuzz_engine.campaign_rounds import run_campaign_rounds
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp) / "ws"
+            bin_dir = ws / "bin" / "demo"
+            bin_dir.mkdir(parents=True)
+            fuzzer = bin_dir / "fuzzer"
+            fuzzer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fuzzer.chmod(0o755)
+            crash_dir = Path(tmp) / "crashes"
+            crash_dir.mkdir()
+            # Fork-mode runs collect resource-class artifacts alongside real
+            # crashes; intake must replay only the genuine crash candidates.
+            (crash_dir / "crash-1").write_bytes(b"boom")
+            (crash_dir / "timeout-aa").write_bytes(b"hang")
+            (crash_dir / "oom-bb").write_bytes(b"big")
+            (crash_dir / "slow-unit-cc").write_bytes(b"slow")
+            engine = _StubEngine(crash_dir)
+
+            result = run_campaign_rounds(
+                engine,
+                project="localfuzz/c/demo",
+                rounds=1,
+                fuzz_seconds=5,
+                workspace_root=ws,
+                env=dict(os.environ),
+            )
+
+            self.assertTrue(result["ok"], result["blockers"])
+            intake = result["rounds"][0]["intake"]
+            self.assertEqual(intake["resource_noise_skipped"], 3)
+            self.assertEqual(intake["findings_recorded"], 1)
+            import_args = [args for name, args in engine.calls if name == "crash_import"]
+            self.assertEqual(len(import_args), 1)
+            staged = Path(import_args[0]["source_path"])
+            staged_names = sorted(f.name for f in staged.rglob("*") if f.is_file())
+            self.assertEqual(staged_names, ["crash-1"])
+
+    def test_round_run_intake_skips_entire_noise_only_source(self) -> None:
+        from agentic_fuzz_engine.campaign_rounds import run_campaign_rounds
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp) / "ws"
+            bin_dir = ws / "bin" / "demo"
+            bin_dir.mkdir(parents=True)
+            fuzzer = bin_dir / "fuzzer"
+            fuzzer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fuzzer.chmod(0o755)
+            crash_dir = Path(tmp) / "crashes"
+            crash_dir.mkdir()
+            (crash_dir / "timeout-aa").write_bytes(b"hang")
+            (crash_dir / "slow-unit-bb").write_bytes(b"slow")
+            engine = _StubEngine(crash_dir)
+
+            result = run_campaign_rounds(
+                engine,
+                project="localfuzz/c/demo",
+                rounds=1,
+                fuzz_seconds=5,
+                workspace_root=ws,
+                env=dict(os.environ),
+            )
+
+        self.assertTrue(result["ok"], result["blockers"])
+        intake = result["rounds"][0]["intake"]
+        self.assertEqual(intake["resource_noise_skipped"], 2)
+        self.assertEqual(intake["findings_recorded"], 0)
+        self.assertNotIn("crash_import", [name for name, _ in engine.calls])
+
+    def test_round_run_intake_skip_prefixes_overridable_per_target(self) -> None:
+        from agentic_fuzz_engine.campaign_rounds import run_campaign_rounds
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp) / "ws"
+            bin_dir = ws / "bin" / "demo"
+            bin_dir.mkdir(parents=True)
+            fuzzer = bin_dir / "fuzzer"
+            fuzzer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fuzzer.chmod(0o755)
+            localfuzz = ws / "targets" / "c" / "demo" / ".localfuzz"
+            localfuzz.mkdir(parents=True)
+            # Empty override list disables the skip entirely.
+            (localfuzz / "fuzz.json").write_text(
+                json.dumps({"intake_skip_prefixes": []}), encoding="utf-8"
+            )
+            crash_dir = Path(tmp) / "crashes"
+            crash_dir.mkdir()
+            (crash_dir / "crash-1").write_bytes(b"boom")
+            (crash_dir / "timeout-aa").write_bytes(b"hang")
+            engine = _StubEngine(crash_dir)
+
+            result = run_campaign_rounds(
+                engine,
+                project="localfuzz/c/demo",
+                rounds=1,
+                fuzz_seconds=5,
+                workspace_root=ws,
+                env=dict(os.environ),
+            )
+
+        self.assertTrue(result["ok"], result["blockers"])
+        intake = result["rounds"][0]["intake"]
+        self.assertEqual(intake["resource_noise_skipped"], 0)
+        import_args = [args for name, args in engine.calls if name == "crash_import"]
+        self.assertEqual(len(import_args), 1)
+        # No staging needed when nothing is filtered — raw crash dir is used.
+        self.assertEqual(import_args[0]["source_path"], str(crash_dir))
+
     def test_round_run_blocks_unvalidated_generated_target(self) -> None:
         from agentic_fuzz_engine.campaign_rounds import run_campaign_rounds
 

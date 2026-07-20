@@ -20,9 +20,30 @@ def build_campaign_report(
     finding_lifecycle_audit: dict[str, Any],
     fidelity_audit: dict[str, Any],
     dedupe: dict[str, Any],
+    reachability_gate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     artifact_sizes = {str(item["name"]): int(item["size"]) for item in artifacts if item.get("name")}
     report_findings = [_finding_entry(group, artifact_sizes) for group in dedupe.get("groups", [])]
+    # Corruption primitives lead the report; dedupe's quality ranking breaks
+    # ties within each primitive class.
+    report_findings.sort(key=lambda item: 0 if item.get("primitive") == "write" else 1)
+
+    # Reachability gate: presence of an operator verdict per representative,
+    # enforced before rendering so the durable artifacts carry the gate.
+    gate = {"mode": "off", "missing": []}
+    if reachability_gate and reachability_gate.get("mode") in ("warn", "block"):
+        gate["mode"] = reachability_gate["mode"]
+        verdicts = reachability_gate.get("verdicts") or {}
+        for entry in report_findings:
+            verdict = verdicts.get(entry.get("finding_id"))
+            entry["reachability_verdict"] = verdict or "unknown"
+            if not verdict or verdict == "unknown":
+                gate["missing"].append(entry.get("finding_id"))
+        if gate["missing"] and gate["mode"] == "block":
+            gate["blocker"] = (
+                f"{len(gate['missing'])} representative(s) lack a reachability verdict; "
+                "run finding-reachability (policy report.require_reachability=block)"
+            )
     phase_summary = _phase_summary(checkpoints)
     report = {
         "run_id": run_id,
@@ -37,7 +58,8 @@ def build_campaign_report(
             "checkpoint_count": len(checkpoints),
             "checkpoint_phases": phase_summary["phases"],
             "blocked_checkpoint_phases": phase_summary["blocked_phases"],
-            "phase_coverage_ok": bool(phase_audit.get("coverage_ok")),
+            "phase_coverage_ok": bool(phase_audit.get("coverage_ok")) and not gate.get("blocker"),
+            "reachability_gate": gate,
             "phase_missing_checkpoints": phase_audit.get("missing_checkpoint_phases", []),
             "phase_stale_checkpoints": phase_audit.get("stale_checkpoint_phases", []),
             "phase_blocked_phases": phase_audit.get("blocked_phases", []),
@@ -90,6 +112,7 @@ def _finding_entry(group: dict[str, Any], artifact_sizes: dict[str, int]) -> dic
         "poc_size": quality.get("poc_size"),
         "reproductions": finding.get("reproductions"),
         "verified": finding.get("verified"),
+        "primitive": finding.get("primitive"),
         "crash_type": signal.crash_type if signal else quality.get("crash_type"),
         "top_function": signal.top_function if signal else quality.get("top_function"),
         "top_file": signal.top_file if signal else quality.get("top_file"),

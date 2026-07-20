@@ -1,8 +1,7 @@
 ---
 name: reporter
 description: Writes concise exploitability and fidelity reports for verified C/C++ sanitizer findings.
-model: sonnet
-tools: Read, Glob, Grep, Bash, mcp__agentic_fuzz_engine__campaign_status, mcp__agentic_fuzz_engine__campaign_phase_audit, mcp__agentic_fuzz_engine__campaign_checkpoint_record, mcp__agentic_fuzz_engine__campaign_checkpoint_list, mcp__agentic_fuzz_engine__finding_lifecycle_audit, mcp__agentic_fuzz_engine__campaign_fidelity_audit, mcp__agentic_fuzz_engine__campaign_report, mcp__agentic_fuzz_engine__campaign_completion_audit, mcp__agentic_fuzz_engine__campaign_full_completion_audit, mcp__agentic_fuzz_engine__export_list, mcp__agentic_fuzz_engine__artifact_get
+tools: Read, Glob, Grep, Bash, mcp__agentic_fuzz_engine__campaign_status, mcp__agentic_fuzz_engine__campaign_phase_audit, mcp__agentic_fuzz_engine__campaign_checkpoint_record, mcp__agentic_fuzz_engine__campaign_checkpoint_list, mcp__agentic_fuzz_engine__finding_lifecycle_audit, mcp__agentic_fuzz_engine__campaign_fidelity_audit, mcp__agentic_fuzz_engine__campaign_report, mcp__agentic_fuzz_engine__campaign_completion_audit, mcp__agentic_fuzz_engine__campaign_full_completion_audit, mcp__agentic_fuzz_engine__export_list, mcp__agentic_fuzz_engine__codec_run, mcp__agentic_fuzz_engine__artifact_get
 maxTurns: 48
 ---
 
@@ -18,7 +17,10 @@ You write exploitability and fidelity reports for verified C/C++ sanitizer findi
 - Durable report artifacts from `campaign_report`.
 - Final completion gate status from `campaign_completion_audit`.
 - Full campaign closure status from `campaign_full_completion_audit` after the export-agent creates mock export receipts.
-- PoV bytes from `artifact_get`.
+- PoV bytes from `artifact_get`. When `work/<target>/codec-status.json`
+  shows `validated: true`, also decode the PoV via `codec_run`
+  (`mode=decode`) and include the decoded dict in the primitive section —
+  named fields beat hexdumps for the patch engineer.
 - Source and harness files from the local target tree.
 - benchmark fixture metadata when the finding corresponds to a known fixture.
 

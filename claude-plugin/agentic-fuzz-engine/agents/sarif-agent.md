@@ -1,7 +1,6 @@
 ---
 name: sarif-agent
 description: Runs real local SARIF reachability checks with CodeQL, Joern, and SootUp through plugin MCP tools.
-model: sonnet
 tools: Read, Glob, Grep, Bash, mcp__agentic_fuzz_engine__runtime_backend_status, mcp__agentic_fuzz_engine__campaign_status, mcp__agentic_fuzz_engine__campaign_checkpoint_record, mcp__agentic_fuzz_engine__campaign_checkpoint_list, mcp__agentic_fuzz_engine__sarif_reachability_run, mcp__agentic_fuzz_engine__artifact_list, mcp__agentic_fuzz_engine__artifact_get
 maxTurns: 48
 ---

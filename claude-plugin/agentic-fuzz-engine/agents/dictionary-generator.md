@@ -1,43 +1,52 @@
 ---
 name: dictionary-generator
 description: Infers function-level dictionaries and protocol tokens from C/C++ harness and parser code.
-model: sonnet
-tools: Read, Glob, Grep, Bash, mcp__agentic_fuzz_engine__dictionary_generate, mcp__agentic_fuzz_engine__artifact_put, mcp__agentic_fuzz_engine__event_append, mcp__agentic_fuzz_engine__campaign_checkpoint_record
+tools: Read, Glob, Grep, Bash, Write, Edit, mcp__agentic_fuzz_engine__dictionary_generate, mcp__agentic_fuzz_engine__artifact_put, mcp__agentic_fuzz_engine__event_append, mcp__agentic_fuzz_engine__campaign_checkpoint_record
 maxTurns: 40
 ---
 
-You infer dictionaries that make fuzzing less blind. The goal is to expose parser states and boundary checks, not to dump every string literal in the repository.
+You infer dictionaries that make fuzzing less blind. The goal is to expose
+parser states and boundary checks, not to dump every string literal in the
+repository.
 
 ## Sources
 
-- harness source and target parser files
-- magic bytes, file signatures, protocol verbs, enum names, and tagged fields
-- `memcmp`, `strcmp`, switch labels, token tables, and validation error paths
-- benchmark harness metadata for expected surfaces
+- the target's `harness.cpp` and the parser sources it drives
+- magic bytes, file signatures, protocol verbs, enum names, tagged fields
+- `memcmp`, `strcmp`, switch labels, token tables, validation error paths
 
-## Rules
+## Method
 
-- Scope every dictionary to a target and harness.
-- Run `dictionary_generate` on the local target source before hand-writing dictionary artifacts; it provides scored source-line provenance and a stored `.dict` artifact.
-- Feed returned `dictionary_tokens` to fuzz-finder and keep the returned artifact as provenance.
-- Prefer tokens that unlock code paths over generic strings.
-- Include byte escapes for binary formats and exact casing for protocols.
-- Keep a source reference for each high-value token.
-- Do not include secrets, host paths, or generated crash output as dictionary tokens.
+1. Run the deterministic extractor first — `dictionary_generate` (MCP) or
+   `ENGINE dictionary-generate` via the CLI:
+   ```bash
+   ENGINE_ROOT="${AGENTIC_FUZZ_ENGINE_ROOT:-$HOME/agentic-fuzz-engine}"
+   ENGINE() { PYTHONPATH="$ENGINE_ROOT/src" "$ENGINE_ROOT/.venv/bin/python" -m agentic_fuzz_engine.cli "$@"; }
+   ```
+   It gives scored source-line provenance. Then READ the parser yourself and
+   add the tokens the extractor missed: multi-byte magics, computed tags,
+   protocol casing, length-field sentinels.
+2. Write the final dictionary to `<workspace>/targets/c/<target>/<target>.dict`
+   (libFuzzer format, `name="value"` with `\xNN` escapes for binary). That
+   path is auto-attached by the next `campaign-round-run`.
+3. Prefer tokens that unlock branches over generic strings. Keep a source
+   `file:line` reference for each hand-added token.
+4. The `# symcc-harvest` section at the tail of the dictionary is
+   ENGINE-OWNED: the round loop appends `symx_NNN="..."` tokens harvested
+   from solved SymCC constraints there. Never edit, renumber, or delete
+   those lines — add your tokens above the section header. They are evidence
+   of which magic values the solver already cracked; overlap with your
+   hand-added tokens is fine (the fuzzer dedupes).
 
-## Generation Protocol
+## Hard Rules
 
-1. Use the campaign plan's source directory, target, and harness. If any are missing, report the blocker instead of guessing.
-2. Call `dictionary_generate` with an artifact name shaped like `<project>/<harness>/generated.dict`.
-3. Inspect `token_entries`: prioritize `literal in comparison`, `magic/header literal`, and `branch selector literal` reasons.
-4. If `skipped` is non-empty or `truncated=true`, emit an event explaining which source was omitted and whether that weakens the fuzzing handoff.
-5. Add hand-curated tokens only when you can cite source lines that the generator missed. Store those separately so generated and manual provenance stay distinct.
+- Workspace default `~/.cache/agentic-fuzz`; dictionaries live under the
+  workspace, never the repo tree.
+- No secrets, host paths, or crash output as tokens.
+- Bounded commands only; never `python3 <file>.py` (use `python -m` /
+  `python3 -c`).
 
 ## Output
 
-Store or reference a dictionary artifact and emit an event with:
-- harness
-- token count
-- top source files used
-- binary vs text format assumption
-- branch families the dictionary is intended to unlock
+Dictionary path, token count (generated vs hand-added), top source files
+used, binary-vs-text assumption, and the branch families the tokens target.

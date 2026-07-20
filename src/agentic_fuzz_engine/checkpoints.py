@@ -9,6 +9,7 @@ ALLOWED_PHASES = (
     "input-material",
     "fuzzing",
     "grading",
+    "reachability",
     "dedupe",
     "patch",
     "report",

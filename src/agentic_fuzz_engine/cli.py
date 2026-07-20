@@ -14,7 +14,7 @@ from .engine import AgenticFuzzEngine
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Agentic Fuzz Engine utility")
-    parser.add_argument("--data-root", default=os.environ.get("CLAUDE_PLUGIN_DATA", "runs/agentic-fuzz-engine"))
+    parser.add_argument("--data-root", default=None)
     parser.add_argument(
         "--reference-root",
         default=os.environ.get("AGENTIC_FUZZ_REFERENCE_ROOT"),
@@ -69,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     campaign_report.add_argument("--project", default=None)
     campaign_report.add_argument("--artifact-prefix", default=None)
     campaign_report.add_argument("--include-disabled", action="store_true")
+    campaign_report.add_argument("--across-runs", action="store_true")
     completion = subcommands.add_parser("campaign-completion-audit")
     completion.add_argument("run_id")
     completion.add_argument("--project", default=None)
@@ -164,7 +165,42 @@ def main(argv: list[str] | None = None) -> int:
     concolic_plan.add_argument("--max-tokens", type=int, default=32)
     concolic_plan.add_argument("--max-seeds", type=int, default=32)
     finding_dedupe = subcommands.add_parser("finding-dedupe")
-    finding_dedupe.add_argument("run_id")
+    finding_dedupe.add_argument("run_id", nargs="?")
+    finding_dedupe.add_argument("--across-runs", action="store_true")
+    finding_dedupe.add_argument("--target")
+    spec_probe_parser = subcommands.add_parser("spec-probe")
+    spec_probe_parser.add_argument("target")
+    spec_probe_parser.add_argument("--spec", default=None)
+    spec_probe_parser.add_argument("--scan-root", default=None)
+    spec_probe_parser.add_argument("--max-iterations", type=int, default=None)
+    spec_probe_parser.add_argument("--workspace-root", default=None)
+    flag_scan_parser = subcommands.add_parser("flag-scan")
+    flag_scan_parser.add_argument("target")
+    flag_scan_parser.add_argument("--source-dir", default=None)
+    flag_scan_parser.add_argument("--workspace-root", default=None)
+    flag_prelude_parser = subcommands.add_parser("flag-prelude")
+    flag_prelude_parser.add_argument("target")
+    flag_prelude_parser.add_argument("--workspace-root", default=None)
+    finding_reach_parser = subcommands.add_parser("finding-reachability")
+    finding_reach_parser.add_argument("run_id")
+    finding_reach_parser.add_argument("finding_id")
+    finding_reach_parser.add_argument("--entry-symbol", required=True)
+    finding_reach_parser.add_argument("--source-dir", default=None)
+    finding_reach_parser.add_argument("--verdict", default=None)
+    finding_reach_parser.add_argument("--note", default=None)
+    finding_reach_parser.add_argument("--workspace-root", default=None)
+    finding_impact_parser = subcommands.add_parser("finding-impact")
+    finding_impact_parser.add_argument("run_id")
+    finding_impact_parser.add_argument("finding_id")
+    finding_impact_parser.add_argument("--source-dir", default=None)
+    finding_impact_parser.add_argument("--timeout-seconds", type=float, default=None)
+    finding_impact_parser.add_argument("--workspace-root", default=None)
+    findings_index = subcommands.add_parser("findings-index")
+    findings_index.add_argument("--run-id")
+    findings_index.add_argument("--target")
+    findings_index.add_argument("--finding-id")
+    findings_index.add_argument("--event")
+    findings_index.add_argument("--raw", action="store_true", help="event rows instead of the folded per-finding view")
     finding_lifecycle = subcommands.add_parser("finding-lifecycle-audit")
     finding_lifecycle.add_argument("run_id")
     finding_lifecycle.add_argument("--strict", action="store_true")
@@ -344,6 +380,87 @@ def main(argv: list[str] | None = None) -> int:
     plateau_parser = subcommands.add_parser("plateau-status")
     plateau_parser.add_argument("target", nargs="?", default=None)
     plateau_parser.add_argument("--workspace-root", default=None)
+    sink_scan_parser = subcommands.add_parser("sink-scan")
+    sink_scan_parser.add_argument("--source-root", default=None)
+    sink_scan_parser.add_argument("--out", default=None)
+    sink_scan_parser.add_argument("--max-files", type=int, default=20000)
+    sink_scan_parser.add_argument("--max-rows-per-module", type=int, default=400)
+    sink_scan_parser.add_argument("--workspace-root", default=None)
+    sink_scan_parser.add_argument(
+        "--merge-jsonl", action="append", dest="merge_jsonl", default=None,
+        help="merge mode: union these sink JSONLs into --out (dedupe file:line:callee, prefer joern/manual provenance) instead of scanning",
+    )
+
+    sink_coverage_parser = subcommands.add_parser("sink-coverage")
+    sink_coverage_parser.add_argument("--target", required=True)
+    sink_coverage_parser.add_argument("--sinks-jsonl", default=None)
+    sink_coverage_parser.add_argument("--timeout-seconds", type=float, default=120)
+    sink_coverage_parser.add_argument("--top", type=int, default=200)
+    sink_coverage_parser.add_argument(
+        "--max-inputs",
+        type=int,
+        default=None,
+        help="sample the newest N corpus entries (default: frontier.coverage_max_inputs policy)",
+    )
+    sink_coverage_parser.add_argument("--workspace-root", default=None)
+    valgrind_parser = subcommands.add_parser("valgrind-sweep")
+    valgrind_parser.add_argument("--target", required=True)
+    valgrind_parser.add_argument("--corpus-dir", default=None)
+    valgrind_parser.add_argument("--max-inputs", type=int, default=2000)
+    valgrind_parser.add_argument("--per-input-timeout", type=float, default=10.0)
+    valgrind_parser.add_argument("--max-seconds", type=float, default=900.0)
+    valgrind_parser.add_argument("--top", type=int, default=50)
+    valgrind_parser.add_argument("--workspace-root", default=None)
+    valgrind_parser.add_argument("replay_command", nargs="+", metavar="command",
+                                 help="replay driver argv; {input} placeholder or input appended")
+
+    seedgen_parser = subcommands.add_parser("seedgen-run")
+    seedgen_parser.add_argument("target")
+    seedgen_parser.add_argument("--script", required=True)
+    seedgen_parser.add_argument("--count", type=int, default=256)
+    seedgen_parser.add_argument("--max-seconds", type=float, default=60.0)
+    seedgen_parser.add_argument("--max-blob-bytes", type=int, default=1024 * 1024)
+    seedgen_parser.add_argument("--memory-mb", type=int, default=1024)
+    seedgen_parser.add_argument("--base-seed", type=int, default=0)
+    seedgen_parser.add_argument("--mode", choices=("generate", "mutate"), default="generate")
+    seedgen_parser.add_argument("--sample-max", type=int, default=64)
+    seedgen_parser.add_argument("--workspace-root", default=None)
+    codec_parser = subcommands.add_parser("codec-run")
+    codec_parser.add_argument("target")
+    codec_parser.add_argument("--mode", choices=("validate", "decode"), default="validate")
+    codec_parser.add_argument("--script", default=None)
+    codec_parser.add_argument("--path", action="append", default=None, dest="paths")
+    codec_parser.add_argument("--max-samples", type=int, default=64)
+    codec_parser.add_argument("--qualify-function", action="append", default=None, dest="qualify_functions")
+    codec_parser.add_argument("--timeout-seconds", type=float, default=60.0)
+    codec_parser.add_argument("--memory-mb", type=int, default=1024)
+    codec_parser.add_argument("--run-id", default=None)
+    codec_parser.add_argument("--workspace-root", default=None)
+    directed_parser = subcommands.add_parser("directed-queue")
+    directed_parser.add_argument("action", choices=("list", "sync", "flag", "complete"))
+    directed_parser.add_argument("--target", default=None)
+    directed_parser.add_argument("--sink", default=None)
+    directed_parser.add_argument("--priority", type=int, default=100)
+    directed_parser.add_argument("--note", default=None)
+    directed_parser.add_argument("--state", default="done")
+    directed_parser.add_argument("--sinks-jsonl", default=None)
+    directed_parser.add_argument("--workspace-root", default=None)
+    directed_build_parser = subcommands.add_parser("directed-build")
+    directed_build_parser.add_argument("target")
+    directed_build_parser.add_argument("--sink", default=None)
+    directed_build_parser.add_argument("--also", action="append", dest="also_files", default=None)
+    directed_build_parser.add_argument("--timeout-seconds", type=float, default=900)
+    directed_build_parser.add_argument("--workspace-root", default=None)
+    jobs_parser = subcommands.add_parser("jobs")
+    jobs_parser.add_argument("action", choices=("sync", "list", "update", "report", "predicate"))
+    jobs_parser.add_argument("job_id", nargs="?", default=None)
+    jobs_parser.add_argument("--state", default=None)
+    jobs_parser.add_argument("--type", dest="job_type", action="append", default=None)
+    jobs_parser.add_argument("--note", default=None)
+    jobs_parser.add_argument("--failure-class", default=None)
+    jobs_parser.add_argument("--fields-json", default=None)
+    jobs_parser.add_argument("--no-consume-attempt", action="store_true")
+    jobs_parser.add_argument("--workspace-root", default=None)
     candidates_parser = subcommands.add_parser("candidates")
     candidates_parser.add_argument("action", choices=("sync", "list", "update"))
     candidates_parser.add_argument("name", nargs="?", default=None)
@@ -351,6 +468,7 @@ def main(argv: list[str] | None = None) -> int:
     candidates_parser.add_argument("--note", default=None)
     candidates_parser.add_argument("--sinks-jsonl", default=None)
     candidates_parser.add_argument("--top", type=int, default=50)
+    candidates_parser.add_argument("--class", dest="entry_class", default=None)
     candidates_parser.add_argument("--workspace-root", default=None)
     round_run_parser = subcommands.add_parser("campaign-round-run")
     round_run_parser.add_argument("project")
@@ -448,8 +566,10 @@ def main(argv: list[str] | None = None) -> int:
     benchmark.add_argument("--strict", action="store_true")
 
     args = parser.parse_args(argv)
+    from .workspace import default_data_root
+
     engine = AgenticFuzzEngine(
-        data_root=args.data_root,
+        data_root=args.data_root or default_data_root(),
         reference_root=args.reference_root,
         audit_roots=tuple(args.audit_root) or _default_audit_roots(),
     )
@@ -513,6 +633,7 @@ def main(argv: list[str] | None = None) -> int:
                 "project": args.project,
                 "artifact_prefix": args.artifact_prefix,
                 "include_disabled": args.include_disabled,
+                "across_runs": args.across_runs,
             },
         )
     elif args.command == "campaign-completion-audit":
@@ -656,7 +777,66 @@ def main(argv: list[str] | None = None) -> int:
             },
         )
     elif args.command == "finding-dedupe":
-        payload = engine.call_tool("finding_dedupe", {"run_id": args.run_id})
+        payload = engine.call_tool(
+            "finding_dedupe",
+            {"run_id": args.run_id, "across_runs": args.across_runs, "target": args.target},
+        )
+    elif args.command == "spec-probe":
+        payload = engine.call_tool(
+            "spec_probe",
+            {
+                "target": args.target,
+                "spec": args.spec,
+                "scan_root": args.scan_root,
+                "max_iterations": args.max_iterations,
+                "workspace_root": args.workspace_root,
+            },
+        )
+    elif args.command == "flag-scan":
+        payload = engine.call_tool(
+            "flag_scan",
+            {"target": args.target, "source_dir": args.source_dir, "workspace_root": args.workspace_root},
+        )
+    elif args.command == "flag-prelude":
+        payload = engine.call_tool(
+            "flag_prelude",
+            {"target": args.target, "workspace_root": args.workspace_root},
+        )
+    elif args.command == "finding-reachability":
+        payload = engine.call_tool(
+            "finding_reachability",
+            {
+                "run_id": args.run_id,
+                "finding_id": args.finding_id,
+                "entry_symbol": args.entry_symbol,
+                "source_dir": args.source_dir,
+                "verdict": args.verdict,
+                "note": args.note,
+                "workspace_root": args.workspace_root,
+            },
+        )
+    elif args.command == "finding-impact":
+        payload = engine.call_tool(
+            "finding_impact",
+            {
+                "run_id": args.run_id,
+                "finding_id": args.finding_id,
+                "source_dir": args.source_dir,
+                "timeout_seconds": args.timeout_seconds,
+                "workspace_root": args.workspace_root,
+            },
+        )
+    elif args.command == "findings-index":
+        payload = engine.call_tool(
+            "findings_index",
+            {
+                "run_id": args.run_id,
+                "target": args.target,
+                "finding_id": args.finding_id,
+                "event": args.event,
+                "raw": args.raw,
+            },
+        )
     elif args.command == "finding-lifecycle-audit":
         payload = engine.call_tool("finding_lifecycle_audit", {"run_id": args.run_id})
         if args.strict and not payload.get("ok"):
@@ -942,6 +1122,116 @@ def main(argv: list[str] | None = None) -> int:
         payload = engine.call_tool(
             "plateau_status", {"target": args.target, "workspace_root": args.workspace_root}
         )
+    elif args.command == "sink-scan":
+        payload = engine.call_tool(
+            "sink_scan",
+            {
+                "source_root": args.source_root,
+                "out": args.out,
+                "max_files": args.max_files,
+                "max_rows_per_module": args.max_rows_per_module,
+                "workspace_root": args.workspace_root,
+                "merge_jsonl": args.merge_jsonl,
+            },
+        )
+    elif args.command == "sink-coverage":
+        payload = engine.call_tool(
+            "sink_coverage",
+            {
+                "target": args.target,
+                "sinks_jsonl": args.sinks_jsonl,
+                "timeout_seconds": args.timeout_seconds,
+                "top": args.top,
+                "max_inputs": args.max_inputs,
+                "workspace_root": args.workspace_root,
+            },
+        )
+    elif args.command == "valgrind-sweep":
+        payload = engine.call_tool(
+            "valgrind_sweep",
+            {
+                "target": args.target,
+                "command": args.replay_command,
+                "corpus_dir": args.corpus_dir,
+                "max_inputs": args.max_inputs,
+                "per_input_timeout": args.per_input_timeout,
+                "max_seconds": args.max_seconds,
+                "top": args.top,
+                "workspace_root": args.workspace_root,
+            },
+        )
+    elif args.command == "seedgen-run":
+        payload = engine.call_tool(
+            "seedgen_run",
+            {
+                "target": args.target,
+                "script": args.script,
+                "count": args.count,
+                "max_seconds": args.max_seconds,
+                "max_blob_bytes": args.max_blob_bytes,
+                "memory_mb": args.memory_mb,
+                "base_seed": args.base_seed,
+                "mode": args.mode,
+                "sample_max": args.sample_max,
+                "workspace_root": args.workspace_root,
+            },
+        )
+    elif args.command == "codec-run":
+        payload = engine.call_tool(
+            "codec_run",
+            {
+                "target": args.target,
+                "mode": args.mode,
+                "script": args.script,
+                "paths": args.paths or [],
+                "max_samples": args.max_samples,
+                "qualify_functions": args.qualify_functions or [],
+                "timeout_seconds": args.timeout_seconds,
+                "memory_mb": args.memory_mb,
+                "run_id": args.run_id,
+                "workspace_root": args.workspace_root,
+            },
+        )
+    elif args.command == "directed-queue":
+        payload = engine.call_tool(
+            "directed_queue",
+            {
+                "action": args.action,
+                "target": args.target,
+                "sink": args.sink,
+                "priority": args.priority,
+                "note": args.note,
+                "state": args.state,
+                "sinks_jsonl": args.sinks_jsonl,
+                "workspace_root": args.workspace_root,
+            },
+        )
+    elif args.command == "directed-build":
+        payload = engine.call_tool(
+            "directed_build",
+            {
+                "target": args.target,
+                "sink": args.sink,
+                "also_files": args.also_files,
+                "timeout_seconds": args.timeout_seconds,
+                "workspace_root": args.workspace_root,
+            },
+        )
+    elif args.command == "jobs":
+        payload = engine.call_tool(
+            "fleet_jobs",
+            {
+                "action": args.action,
+                "job_id": args.job_id,
+                "state": args.state,
+                "types": args.job_type,
+                "note": args.note,
+                "failure_class": args.failure_class,
+                "fields_json": args.fields_json,
+                "consume_attempt": not args.no_consume_attempt,
+                "workspace_root": args.workspace_root,
+            },
+        )
     elif args.command == "candidates":
         payload = engine.call_tool(
             "candidate_ledger",
@@ -952,6 +1242,7 @@ def main(argv: list[str] | None = None) -> int:
                 "note": args.note,
                 "sinks_jsonl": args.sinks_jsonl,
                 "top": args.top,
+                "entry_class": args.entry_class,
                 "workspace_root": args.workspace_root,
             },
         )

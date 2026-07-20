@@ -79,8 +79,8 @@ def generate_target(
     spec_path = _resolve_spec_path(spec, root)
     spec_data = json.loads(spec_path.read_text(encoding="utf-8"))
     generator = str(spec_data.get("type") or "")
-    if generator not in {"type_enum", "direct_call", "symbolic_string"}:
-        raise ValueError(f"spec.type must be type_enum, direct_call, or symbolic_string: {spec_path}")
+    if generator not in {"type_enum", "direct_call", "symbolic_string", "sequence"}:
+        raise ValueError(f"spec.type must be type_enum, direct_call, symbolic_string, or sequence: {spec_path}")
 
     target_dir = root / TARGETS_RELATIVE / name
     bin_dir = root / "bin" / name
@@ -120,6 +120,8 @@ def generate_target(
         outcome = _generate_type_enum(spec_data, target_dir=target_dir, placeholders=placeholders)
     elif generator == "direct_call":
         outcome = _generate_direct_call(spec_data, target_dir=target_dir, sinks=sinks, placeholders=placeholders)
+    elif generator == "sequence":
+        outcome = _generate_sequence(spec_data, target_dir=target_dir, placeholders=placeholders)
     else:
         outcome = _generate_symbolic_string(
             spec_data, root=root, name=name, sinks=sinks, placeholders=placeholders
@@ -567,12 +569,22 @@ def _generate_direct_call(
             "blockers": [],
         }
 
+    # When the spec names the module's public headers, include them instead of
+    # rendering prototypes: functions returning project types (thrift structs,
+    # spec classes) need complete type definitions at the call site, which a
+    # bare prototype cannot provide.
+    harness_includes = [
+        _substitute(str(entry), placeholders) for entry in (spec.get("harness_includes") or []) if str(entry).strip()
+    ]
+    include_lines = [f'#include "{entry}"' for entry in harness_includes]
+
     prototypes = []
     calls = []
     tus = []
     for index, candidate in enumerate(candidates):
         extraction = candidate["extraction"]
-        prototypes.append(_render_prototype(extraction))
+        if not include_lines:
+            prototypes.append(_render_prototype(extraction))
         calls.append(f"    case {index}: {_render_call(extraction, candidate['shape'])} break;")
         if candidate["tu"] not in tus:
             tus.append(candidate["tu"])
@@ -585,6 +597,7 @@ def _generate_direct_call(
             "#include <cstddef>",
             "#include <cstdint>",
             "#include <string>",
+            *include_lines,
             "",
             *prototypes,
             "",
@@ -632,6 +645,161 @@ def _generate_direct_call(
         "build_steps": build_steps,
         "blockers": [] if build_steps else ["spec has no build.steps"],
         "needs_authoring": bool(skipped),
+    }
+
+
+# ---------------------------------------------------------------------------
+# sequence (stateful op-tape lane)
+
+MAX_SEQUENCE_OPS = 64
+MAX_SEQUENCE_ARG_BYTES = 1_048_576
+SEQUENCE_ARG_KINDS = {"bytes", "u8", "u32", "u64"}
+
+
+def _generate_sequence(spec: dict[str, Any], *, target_dir: Path, placeholders: Mapping[str, str]) -> dict[str, Any]:
+    """Stateful multi-op harness: the input is an op-tape —
+    ``[1 op byte][per-arg TLV: 2-byte LE length + bytes]`` repeated up to
+    ``max_ops`` times, op selected by ``tape[i] % len(ops)``. A fresh
+    context per input (setup/teardown from the spec) keeps crashes
+    deterministic; sequence state lives across *ops*, never across inputs.
+
+    The tape format is deliberately simple so seedgen scripts and the
+    grammar lane can author structured sequences (op byte + TLV args).
+    """
+    context = spec.get("context") or {}
+    ops = spec.get("ops") or []
+    if not isinstance(ops, list) or not ops:
+        return {"summary": {"ops": 0}, "needs_authoring": True, "blockers": ["sequence spec has no ops"]}
+    if len(ops) > MAX_SEQUENCE_OPS:
+        return {"summary": {"ops": len(ops)}, "needs_authoring": True,
+                "blockers": [f"sequence spec exceeds {MAX_SEQUENCE_OPS} ops"]}
+    max_ops = max(1, min(int(spec.get("max_ops", 16)), 256))
+
+    blockers: list[str] = []
+    for op in ops:
+        for arg in op.get("args", []) or []:
+            kind = str(arg.get("kind") or "bytes")
+            if kind not in SEQUENCE_ARG_KINDS:
+                blockers.append(f"op {op.get('name')}: arg kind {kind!r} not in {sorted(SEQUENCE_ARG_KINDS)}")
+    if blockers:
+        return {"summary": {"ops": len(ops)}, "needs_authoring": True, "blockers": blockers}
+
+    include_lines = [f'#include "{_substitute(str(item), placeholders)}"' for item in spec.get("includes", [])]
+    setup = _substitute(str(context.get("setup") or ""), placeholders)
+    teardown = _substitute(str(context.get("teardown") or ""), placeholders)
+
+    case_lines: list[str] = []
+    for index, op in enumerate(ops):
+        op_name = str(op.get("name") or f"op{index}")
+        case_lines.append(f"      case {index}: {{  // {op_name}")
+        for arg in op.get("args", []) or []:
+            arg_name = str(arg.get("name") or "arg")
+            kind = str(arg.get("kind") or "bytes")
+            if kind == "bytes":
+                cap = max(0, min(int(arg.get("max", 4096)), MAX_SEQUENCE_ARG_BYTES))
+                case_lines.append(f"        std::string {arg_name} = tape.bytes({cap});")
+            elif kind == "u8":
+                case_lines.append(f"        uint8_t {arg_name} = tape.u8();")
+            elif kind == "u32":
+                case_lines.append(f"        uint32_t {arg_name} = tape.u32();")
+            else:
+                case_lines.append(f"        uint64_t {arg_name} = tape.u64();")
+        call = str(op.get("call") or "").strip()
+        if call:
+            case_lines.append(f"        try {{ {call} }} catch (...) {{}}")
+        case_lines.append("        break;")
+        case_lines.append("      }")
+
+    setup_lines = [f"  {line}" for line in setup.splitlines() if line.strip()]
+    teardown_lines = [f"    {line}" for line in teardown.splitlines() if line.strip()]
+
+    harness = "\n".join(
+        [
+            f"// Auto-generated by target-generate (sequence, {len(ops)} ops). Do not edit by hand.",
+            "// Op-tape input: repeated [1 op byte][per-arg TLV: 2-byte LE len + bytes],",
+            f"// op = byte % {len(ops)}, at most {max_ops} ops per input. Integer args are",
+            "// fixed-width LE reads (zero-padded on short tape). Seedgen scripts should",
+            "// emit tapes in this format.",
+            "",
+            "#include <cstddef>",
+            "#include <cstdint>",
+            "#include <cstring>",
+            "#include <string>",
+            *include_lines,
+            "",
+            "namespace {",
+            "struct Tape {",
+            "  const uint8_t* p;",
+            "  size_t n;",
+            "  bool op_byte(uint8_t* out) {",
+            "    if (n == 0) return false;",
+            "    *out = *p; ++p; --n;",
+            "    return true;",
+            "  }",
+            "  std::string bytes(size_t max_len) {",
+            "    if (n < 2) { p += n; n = 0; return std::string(); }",
+            "    size_t len = static_cast<size_t>(p[0]) | (static_cast<size_t>(p[1]) << 8);",
+            "    p += 2; n -= 2;",
+            "    if (len > max_len) len = max_len;",
+            "    if (len > n) len = n;",
+            "    std::string out(reinterpret_cast<const char*>(p), len);",
+            "    p += len; n -= len;",
+            "    return out;",
+            "  }",
+            "  uint64_t fixed(unsigned width) {",
+            "    uint64_t value = 0;",
+            "    for (unsigned i = 0; i < width; ++i) {",
+            "      if (n == 0) break;",
+            "      value |= static_cast<uint64_t>(*p) << (8 * i);",
+            "      ++p; --n;",
+            "    }",
+            "    return value;",
+            "  }",
+            "  uint8_t u8() { return static_cast<uint8_t>(fixed(1)); }",
+            "  uint32_t u32() { return static_cast<uint32_t>(fixed(4)); }",
+            "  uint64_t u64() { return fixed(8); }",
+            "};",
+            "}  // namespace",
+            "",
+            f"static const unsigned kOpCount = {len(ops)};",
+            f"static const unsigned kMaxOps = {max_ops};",
+            "",
+            'extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {',
+            "  if (size == 0) return 0;",
+            "  Tape tape{data, size};",
+            *setup_lines,
+            "  uint8_t op = 0;",
+            "  for (unsigned i = 0; i < kMaxOps && tape.op_byte(&op); ++i) {",
+            "    switch (op % kOpCount) {",
+            *case_lines,
+            "    }",
+            "  }",
+            "  {",
+            *(teardown_lines or ["    // no teardown declared"]),
+            "  }",
+            "  return 0;",
+            "}",
+            "",
+            _file_main_block(),
+        ]
+    )
+    written_flag, written_note = _write_generated(target_dir / "harness.cpp", harness)
+    if not written_flag:
+        return {
+            "summary": {"preserved": written_note},
+            "written": [],
+            "build_steps": [],
+            "blockers": [],
+            "needs_authoring": False,
+            "skipped": [{"reason": written_note}],
+        }
+    build_steps = _substituted_build_steps(spec, placeholders)
+    return {
+        "summary": {"ops": len(ops), "max_ops": max_ops,
+                    "args": sum(len(op.get("args", []) or []) for op in ops)},
+        "written": [str(target_dir / "harness.cpp")],
+        "build_steps": build_steps,
+        "blockers": [] if build_steps else ["spec has no build.steps"],
     }
 
 

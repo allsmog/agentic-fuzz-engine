@@ -9,7 +9,13 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .dedupe import finding_quality, finding_signature
+from .crash_identity import parse_crash_output, root_signature as compute_root_signature
+from .dedupe import dedupe_findings, finding_signature
+from .findings_index import (
+    append_index_event,
+    artifact_sizes_across,
+    collect_target_findings,
+)
 
 UTC = timezone.utc
 
@@ -27,6 +33,10 @@ class FindingRecord:
     created_at: str
     reproductions: int | None = None
     verified: bool | None = None
+    crash_state: list[str] | None = None
+    root_signature: str | None = None
+    dedup_tokens: list[str] | None = None
+    primitive: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -69,6 +79,9 @@ class EngineState:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, sort_keys=True) + "\n")
+        # Mirror finding lifecycle events into the durable workspace-level
+        # index so run-dir retention pruning never erases what was found.
+        append_index_event(self.data_root, run_id=run_id, event_type=event_type, payload=payload)
         return event
 
     def artifact_put(self, run_id: str, name: str, content_b64: str) -> dict[str, Any]:
@@ -147,6 +160,7 @@ class EngineState:
             error_token=error_token,
             crash_output=crash_output,
         )
+        signal = parse_crash_output(crash_output)
         finding = FindingRecord(
             finding_id=f"finding-{signature}",
             target=target,
@@ -159,6 +173,10 @@ class EngineState:
             created_at=_now(),
             reproductions=reproductions,
             verified=verified,
+            crash_state=list(signal.crash_state) if signal else None,
+            root_signature=compute_root_signature(signal) if signal else None,
+            dedup_tokens=list(signal.dedup_tokens) if signal and signal.dedup_tokens else None,
+            primitive=str(signal.access).lower() if signal and signal.access else None,
         )
         path = self._run_dir(run_id) / "findings.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,31 +188,19 @@ class EngineState:
     def finding_dedupe(self, run_id: str) -> dict[str, Any]:
         findings = self._read_jsonl(self._run_dir(run_id) / "findings.jsonl")
         artifact_sizes = {str(item["name"]): int(item["size"]) for item in self.artifact_list(run_id)["artifacts"]}
-        groups: dict[str, list[dict[str, Any]]] = {}
-        for finding in findings:
-            groups.setdefault(str(finding["signature"]), []).append(finding)
-        ranked_groups = []
-        for signature, items in sorted(groups.items()):
-            ranked = sorted(
-                items,
-                key=lambda item: finding_quality(item, artifact_sizes=artifact_sizes)["score"],
-                reverse=True,
-            )
-            representative = ranked[0]
-            ranked_groups.append(
-                {
-                    "signature": signature,
-                    "count": len(items),
-                    "representative": representative,
-                    "representative_quality": finding_quality(representative, artifact_sizes=artifact_sizes),
-                    "duplicates": ranked[1:],
-                    "duplicate_qualities": [
-                        finding_quality(item, artifact_sizes=artifact_sizes)
-                        for item in ranked[1:]
-                    ],
-                }
-            )
-        return {"run_id": run_id, "groups": ranked_groups}
+        return {"run_id": run_id, "groups": dedupe_findings(findings, artifact_sizes=artifact_sizes)}
+
+    def finding_dedupe_across(self, target: str) -> dict[str, Any]:
+        """Dedupe every finding recorded for a target across live run dirs
+        and GC archives — the retention-proof view of a whole campaign."""
+        findings = collect_target_findings(self.data_root, target)
+        artifact_sizes = artifact_sizes_across(self.data_root, findings)
+        return {
+            "target": target,
+            "across_runs": True,
+            "source_runs": sorted({str(f.get("source_run")) for f in findings if f.get("source_run")}),
+            "groups": dedupe_findings(findings, artifact_sizes=artifact_sizes),
+        }
 
     def finding_list(self, run_id: str) -> list[dict[str, Any]]:
         return self._read_jsonl(self._run_dir(run_id) / "findings.jsonl")

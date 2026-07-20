@@ -190,6 +190,43 @@ class DirectCallGeneratorTests(unittest.TestCase):
             self.assertTrue(workorder["skipped"])
 
 
+    def test_harness_includes_replace_prototypes(self) -> None:
+        # Functions returning project types need the module header included in
+        # the harness; rendered prototypes cannot provide complete types.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            ws = _make_workspace(tmp_path)
+            source_root = tmp_path / "code"
+            source_root.mkdir()
+            (source_root / "synth.cpp").write_text(SYNTH_SOURCE, encoding="utf-8")
+            sinks = tmp_path / "sinks.jsonl"
+            rows = [{"tag": "mem-copy", "file": "synth.cpp", "line": 9, "method": "ParseFrame", "callee": "memcpy"}]
+            sinks.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+            spec_path = tmp_path / "spec.json"
+            spec_path.write_text(
+                json.dumps(
+                    {
+                        "type": "direct_call",
+                        "source_root": str(source_root),
+                        "harness_includes": ["acme/io.h"],
+                        "build": {"steps": [{"name": "libfuzzer", "argv": ["/bin/true", "{extra_sources}"], "env": {}}]},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = generate_target(
+                name="mem_copy_inc", spec=str(spec_path), workspace_root=ws,
+                sinks_jsonl=sinks, sink_tag="mem-copy", env={},
+            )
+
+            self.assertTrue(result["ok"], result["blockers"])
+            harness = (ws / "targets" / "c" / "mem_copy_inc" / "harness.cpp").read_text(encoding="utf-8")
+            self.assertIn('#include "acme/io.h"', harness)
+            self.assertNotIn("namespace acme { namespace io {", harness)
+            self.assertIn("acme::io::ParseFrame(reinterpret_cast<const char*>(payload)", harness)
+
+
 class SymbolicStringGeneratorTests(unittest.TestCase):
     def test_generates_klee_harness_and_ci_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
