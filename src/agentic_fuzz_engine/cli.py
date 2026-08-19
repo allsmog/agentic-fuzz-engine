@@ -341,7 +341,11 @@ def main(argv: list[str] | None = None) -> int:
     workspace_init_parser.add_argument("--root", default=None)
     workspace_init_parser.add_argument("--map", action="append", dest="path_maps", default=[], metavar="HOST=OUTER")
     workspace_init_parser.add_argument("--source-dir", default=None)
-    workspace_init_parser.add_argument("--klee-image", default=None)
+    workspace_init_parser.add_argument(
+        "--klee-image",
+        default=None,
+        help="immutable KLEE image reference (name@sha256:<digest>); no image is configured by default",
+    )
     workspace_init_parser.add_argument("--build-container", default=None)
     workspace_init_parser.add_argument("--mount", action="append", dest="extra_mounts", default=[], metavar="HOST=CONTAINER[:ro]")
     workspace_init_parser.add_argument("--copy", action="append", dest="copies", default=[], metavar="SRC=DEST_REL")

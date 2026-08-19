@@ -20,6 +20,21 @@ from agentic_fuzz_engine.workspace import (
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_workspace_init_leaves_klee_image_unset_without_an_immutable_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "ws"
+
+            result = workspace_init(root=root, env={})
+
+            self.assertTrue(result["ok"], result["blockers"])
+            self.assertEqual(result["docker"]["klee_image"], "")
+            config = json.loads((root / WORKSPACE_CONFIG_NAME).read_text(encoding="utf-8"))
+            self.assertEqual(config["docker"]["klee_image"], "")
+            self.assertIn(
+                "export AGENTIC_FUZZ_KLEE_IMAGE=''",
+                (root / "env.sh").read_text(encoding="utf-8"),
+            )
+
     def test_workspace_init_creates_layout_config_and_env_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "ws"

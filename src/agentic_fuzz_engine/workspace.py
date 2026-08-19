@@ -126,7 +126,9 @@ DEFAULT_POLICY: dict[str, Any] = {
 KLEE_IMAGE_ENV = "AGENTIC_FUZZ_KLEE_IMAGE"
 WORKSPACE_CONFIG_NAME = "workspace.json"
 WORKSPACE_ENV_FILE = "env.sh"
-DEFAULT_KLEE_IMAGE = "klee-ng:dev-libcxx"
+# Executable container images must be supplied as immutable digest references.
+# An empty default keeps a new workspace honest until the operator configures one.
+DEFAULT_KLEE_IMAGE = ""
 WORKSPACE_SUBDIRS = (
     "data",
     "targets/c",
