@@ -8,7 +8,10 @@ from pathlib import Path
 
 
 def main() -> int:
-    data_root = Path(os.environ.get("CLAUDE_PLUGIN_DATA", "runs/agentic-fuzz-engine"))
+    data_root = Path(
+        os.environ.get("CLAUDE_PLUGIN_DATA")
+        or (Path(os.environ["XDG_STATE_HOME"]) / "agentic-fuzz-engine" if os.environ.get("XDG_STATE_HOME") else Path.home() / ".local" / "state" / "agentic-fuzz-engine")
+    )
     runs_root = data_root / "runs"
     while True:
         campaigns = sorted(runs_root.glob("*/campaign.json")) if runs_root.exists() else []

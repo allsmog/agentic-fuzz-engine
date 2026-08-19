@@ -1,5 +1,6 @@
 {
   "name": "agentic-fuzz-local",
+  "description": "Local C/C++ fuzzing plugin marketplace. Plugin tools and configured containers can execute locally; optional checkout tools and fidelity fixtures are not bundled.",
   "owner": {
     "name": "Agentic Fuzz Engine"
   },
@@ -7,7 +8,7 @@
     {
       "name": "agentic-fuzz",
       "source": "./agentic-fuzz-engine",
-      "description": "Agentic C/C++ fuzzing engine: workspace campaigns, plateau detection, candidate ledger, corpus GC, KLEE/SymCC lanes."
+      "description": "Local C/C++ fuzzing engine with workspace campaigns and optional KLEE/SymCC integrations. Plugin tools and configured containers can execute; checkout-only tools and fidelity fixtures are optional and unbundled."
     }
   ]
 }

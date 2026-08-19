@@ -184,7 +184,6 @@ class AgenticFuzzFullRuntimeTests(unittest.TestCase):
             "fidelity-owned-build-replay.md",
             "fidelity-oss-fuzz-build.md",
             "fidelity-oss-fuzz-build-replay.md",
-            "fidelity-remote-amd64-replay.md",
             "runtime-doctor.md",
             "runtime-backend-status.md",
             "fuzz-ensemble-run.md",
