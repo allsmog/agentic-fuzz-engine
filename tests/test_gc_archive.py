@@ -6,7 +6,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentic_fuzz_engine.gc import run_campaign_gc
+from agentic_fuzz_engine.gc import (
+    _archive_run,
+    _contained_rmtree,
+    _minimize_corpus,
+    _prune_oldest,
+    _prune_runs_with_archive,
+    run_campaign_gc,
+)
 from agentic_fuzz_engine.workspace import workspace_init
 
 
@@ -86,6 +93,114 @@ class GcArchiveTest(unittest.TestCase):
             manifest = json.loads((archived / "manifest.json").read_text(encoding="utf-8"))
             skipped = {item["file"] for item in manifest["skipped"]}
             self.assertIn("findings.jsonl", skipped)
+
+    def test_gc_rejects_noncanonical_target_and_symlinked_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            ws = tmp_path / "ws"
+            workspace_init(root=ws, env={})
+            with self.assertRaises(ValueError):
+                run_campaign_gc(workspace_root=ws, target="../outside", env={})
+
+            parent = tmp_path / "managed"
+            parent.mkdir()
+            outside = tmp_path / "outside"
+            outside.mkdir()
+            link = parent / "linked"
+            link.symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                _contained_rmtree(link, parent)
+            with self.assertRaises(ValueError):
+                _prune_oldest(link, keep=0)
+            self.assertTrue(outside.exists())
+
+    def test_archive_refuses_symlinked_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            run_dir = _make_run(tmp_path / "runs", "run-old")
+            archive_root = tmp_path / "archive" / "runs"
+            archive_root.mkdir(parents=True)
+            outside = tmp_path / "outside"
+            outside.mkdir()
+            destination = archive_root / "run-old"
+            destination.symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                _archive_run(
+                    run_dir,
+                    destination,
+                    archive_root=archive_root,
+                    max_bytes=1024,
+                    events_tail_bytes=128,
+                )
+            self.assertFalse((outside / "manifest.json").exists())
+
+    def test_archive_symlink_inputs_leave_run_unpruned(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            runs = tmp_path / "runs"
+            run_dir = _make_run(runs, "run-old")
+            victim = tmp_path / "victim"
+            victim.write_bytes(b"do-not-read-or-change")
+            (run_dir / "artifacts" / "crash-1.bin").unlink()
+            (run_dir / "artifacts" / "crash-1.bin").symlink_to(victim)
+            result = _prune_runs_with_archive(
+                runs, keep=0, archive_root=tmp_path / "archive" / "runs", max_mb=1, events_tail_kb=1
+            )
+            self.assertEqual(result["removed"], 0)
+            self.assertEqual(result["archived"], 0)
+            self.assertEqual(len(result["archive_failures"]), 1)
+            self.assertTrue(run_dir.exists())
+            self.assertEqual(victim.read_bytes(), b"do-not-read-or-change")
+
+    def test_archive_rejects_symlinked_events_and_existing_output_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            run_dir = _make_run(tmp_path / "runs", "run-old")
+            archive_root = tmp_path / "archive" / "runs"
+            archive_root.mkdir(parents=True)
+            victim = tmp_path / "victim"
+            victim.write_bytes(b"untouched")
+            events = run_dir / "events.jsonl"
+            events.unlink()
+            events.symlink_to(victim)
+            with self.assertRaises(ValueError):
+                _archive_run(run_dir, archive_root / "run-old", archive_root=archive_root, max_bytes=1024, events_tail_bytes=128)
+            self.assertFalse((archive_root / "run-old").exists())
+
+            events.unlink()
+            events.write_text("{}\n", encoding="utf-8")
+            for output_name in ("events-tail.jsonl", "manifest.json"):
+                destination = archive_root / "run-old"
+                destination.mkdir()
+                (destination / output_name).symlink_to(victim)
+                with self.assertRaises(ValueError):
+                    _archive_run(run_dir, destination, archive_root=archive_root, max_bytes=1024, events_tail_bytes=128)
+                self.assertEqual(victim.read_bytes(), b"untouched")
+                (destination / output_name).unlink()
+                destination.rmdir()
+
+    def test_merge_state_symlinks_never_touch_external_victim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            parent = tmp_path / "work" / "demo"
+            corpus = parent / "seeds"
+            corpus.mkdir(parents=True)
+            (corpus / "seed").write_bytes(b"seed")
+            fuzzer = tmp_path / "fuzzer"
+            fuzzer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fuzzer.chmod(0o755)
+            victim = tmp_path / "victim"
+            victim.write_bytes(b"untouched")
+            for state_name in ("merge.meta", "merge.ctl"):
+                state = parent / state_name
+                state.symlink_to(victim)
+                with self.assertRaises(ValueError):
+                    _minimize_corpus(
+                        name="demo", fuzzer=fuzzer, corpus=corpus,
+                        min_files=0, max_mb=0, env={},
+                    )
+                self.assertEqual(victim.read_bytes(), b"untouched")
+                state.unlink()
 
 
 if __name__ == "__main__":

@@ -42,6 +42,9 @@ MISSING_HEADER_RE = re.compile(r"fatal error: '([^']+)' file not found")
 UNDEFINED_REF_RES = (
     re.compile(r"undefined reference to [`']([^'\n]+)'"),
     re.compile(r"undefined symbol: ([^\n(]+)"),
+    # Apple ld reports each unresolved symbol on its own quoted line rather
+    # than using the GNU "undefined reference" wording.
+    re.compile(r"^\s*[\"']([^\"'\n]+)[\"'], referenced from:", re.MULTILINE),
 )
 UNDECLARED_RE = re.compile(r"harness\.cpp:\d+:\d+: error: (use of undeclared identifier.+)")
 

@@ -385,7 +385,7 @@ class RoundLoopWeightsIntegrationTests(unittest.TestCase):
             focus_call = fuzz_calls[2]
             command = focus_call["harness_command"]
             self.assertTrue(str(command[1]).endswith("focus-seeds"))
-            self.assertEqual(str(command[2]), str(corpus))
+            self.assertEqual(Path(command[2]).resolve(), corpus.resolve())
             self.assertEqual(focus_call["artifact_prefix"], "rounds/2/focus-crashes")
             # Main segment of round 2 shortened by the focus fraction.
             main_call = fuzz_calls[1]

@@ -292,16 +292,16 @@ class KleePackGenTests(unittest.TestCase):
             entry = result["entry"]
             self.assertEqual(
                 entry["linkSources"],
-                ["/work/harnesses/gen/demo-pack.cpp", f"{src_tree}/code/dep.cpp"],
+                ["/work/harnesses/gen/demo-pack.cpp", f"{src_tree.resolve()}/code/dep.cpp"],
             )
             self.assertTrue(entry["source"].endswith("demo-pack-main.cpp"))
             wrapper_text = (ws / "klee" / "harnesses" / "gen" / "demo-pack-main.cpp").read_text(encoding="utf-8")
             self.assertIn("klee_make_symbolic(data", wrapper_text)
             self.assertIn("klee_assume(size <= sizeof data)", wrapper_text)
             self.assertIn("-DOPENSSL3", entry["compileArgs"])
-            self.assertIn(f"-I{src_tree}/code", entry["compileArgs"])
-            self.assertIn("-I/work/gen-include/demo/_shared", entry["compileArgs"])
-            self.assertTrue((ws / "klee" / "gen-include" / "demo" / "_shared" / "helper.h").is_file())
+            self.assertIn(f"-I{src_tree.resolve()}/code", entry["compileArgs"])
+            self.assertIn("-I/work/gen-include/demo/workspace/targets/c/_shared", entry["compileArgs"])
+            self.assertTrue((ws / "klee" / "gen-include" / "demo" / "workspace" / "targets" / "c" / "_shared" / "helper.h").is_file())
             self.assertNotIn("--emit-all-errors", entry["kleeArgs"])
             self.assertNotIn("-DFUZZ_MAIN", entry["compileArgs"])
             ci = json.loads((ws / "klee" / "gen-packs.ci.json").read_text(encoding="utf-8"))

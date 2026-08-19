@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 from agentic_fuzz_engine.scaffold import scaffold_target, select_targets
 from agentic_fuzz_engine.workspace import (
     WORKSPACE_CONFIG_NAME,
+    _render_env_file,
     load_workspace,
     translate_host_path,
     workspace_init,
@@ -74,6 +76,45 @@ class WorkspaceTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("escapes workspace", result["blockers"][0])
 
+    def test_workspace_copy_rejects_sibling_prefix_and_nested_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "source"
+            source.mkdir()
+            (source / "input").write_text("ok", encoding="utf-8")
+            root = tmp_path / "workspace"
+            outside = tmp_path / "workspace-escape"
+            outside.mkdir()
+            result = workspace_init(root=root, copies=[f"{source}=../workspace-escape/out"], env={})
+            self.assertFalse(result["ok"])
+            self.assertFalse((outside / "out").exists())
+
+            (root / "klee" / "linked").symlink_to(outside, target_is_directory=True)
+            result = workspace_init(root=root, copies=[f"{source}=klee/linked/out"], env={})
+            self.assertFalse(result["ok"])
+            self.assertFalse((outside / "out").exists())
+
+    def test_rendered_env_quotes_shell_values_and_rejects_controls(self) -> None:
+        rendered = _render_env_file(Path("/tmp/work space"), "image; $(unexpected)")
+        self.assertIn("export AGENTIC_FUZZ_KLEE_IMAGE='image; $(unexpected)'", rendered)
+        with self.assertRaises(ValueError):
+            _render_env_file(Path("/tmp/work"), "bad\nvalue")
+
+    def test_workspace_metadata_outputs_reject_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for name in ("workspace.json", "env.sh", "campaign-policy.json"):
+                root = tmp_path / name.replace(".", "-")
+                workspace_init(root=root, env={})
+                victim = tmp_path / f"{name}.victim"
+                victim.write_text("untouched", encoding="utf-8")
+                output = root / name
+                output.unlink()
+                output.symlink_to(victim)
+                with self.assertRaises(ValueError):
+                    workspace_init(root=root, env={})
+                self.assertEqual(victim.read_text(encoding="utf-8"), "untouched")
+
     def test_translate_host_path_uses_longest_prefix_and_identity_fallback(self) -> None:
         workspace = {
             "path_maps": [
@@ -104,7 +145,7 @@ class ContainerBuildTests(unittest.TestCase):
                     {
                         "steps": [
                             {"name": "ok", "argv": ["/usr/bin/touch", "{bin_dir}/fuzzer"], "env": {}},
-                            {"name": "boom", "argv": ["/bin/false"], "env": {}},
+                            {"name": "boom", "argv": [sys.executable, "-c", "raise SystemExit(1)"], "env": {}},
                             {"name": "after", "argv": ["/bin/true"], "env": {}},
                         ]
                     }

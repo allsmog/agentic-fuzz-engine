@@ -382,21 +382,37 @@ def _map_pack_path(
     path_text: str, *, source_dir: str, root: Path, gen_dir: Path, short: str, notes: list[str]
 ) -> str | None:
     """Map a build.json path onto the klee container's view of the world."""
-    if source_dir and path_text.startswith(source_dir):
-        return path_text  # source tree is mounted at the same path in-container
-    resolved = Path(path_text)
-    if str(resolved).startswith(str(root)):
+    resolved = Path(path_text).expanduser().resolve(strict=False)
+    if source_dir:
+        source_root = Path(source_dir).expanduser().resolve(strict=False)
+        try:
+            resolved.relative_to(source_root)
+        except ValueError:
+            pass
+        else:
+            return str(resolved)  # source tree is mounted at the same path in-container
+    root_resolved = root.resolve()
+    try:
+        workspace_relative = resolved.relative_to(root_resolved)
+    except ValueError:
+        workspace_relative = None
+    if workspace_relative is not None:
         if resolved.is_file():
-            destination = gen_dir / f"{short}-{resolved.name}"
+            destination = gen_dir / "workspace" / workspace_relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(resolved, destination)
-            return f"/work/harnesses/gen/{destination.name}"
+            return f"/work/harnesses/gen/workspace/{workspace_relative.as_posix()}"
         if resolved.is_dir():
-            destination = root / "klee" / "gen-include" / short / resolved.name
-            destination.mkdir(parents=True, exist_ok=True)
-            for entry in resolved.iterdir():
-                if entry.is_file():
-                    shutil.copy2(entry, destination / entry.name)
-            return f"/work/gen-include/{short}/{resolved.name}"
+            destination = root / "klee" / "gen-include" / short / "workspace" / workspace_relative
+            try:
+                destination.resolve(strict=False).relative_to(resolved)
+            except ValueError:
+                pass
+            else:
+                notes.append(f"workspace directory dropped: copy destination is inside source: {path_text}")
+                return None
+            shutil.copytree(resolved, destination, dirs_exist_ok=True, symlinks=True)
+            return f"/work/gen-include/{short}/workspace/{workspace_relative.as_posix()}"
         notes.append(f"workspace path missing, dropped: {path_text}")
         return None
     # system paths: keep and let the container's compiler resolve or complain

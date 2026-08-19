@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from agentic_fuzz_engine.harness_gen import (
+    _map_pack_path,
     extract_function_signature,
     generate_target,
 )
@@ -273,6 +274,43 @@ class SymbolicStringGeneratorTests(unittest.TestCase):
             self.assertIn("klee_make_symbolic_std_string_n", harness)
             self.assertIn("acme::io::BuildCommand", harness)
             self.assertIn("klee_ng_assert_shell_safe", harness)
+
+
+class KleePackPathTests(unittest.TestCase):
+    def test_workspace_paths_keep_canonical_relative_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "ws"
+            first = root / "targets" / "c" / "one" / "shared.cpp"
+            second = root / "targets" / "c" / "two" / "shared.cpp"
+            first.parent.mkdir(parents=True)
+            second.parent.mkdir(parents=True)
+            first.write_text("int first() { return 1; }\n", encoding="utf-8")
+            second.write_text("int second() { return 2; }\n", encoding="utf-8")
+            generated = root / "klee" / "harnesses" / "gen"
+            generated.mkdir(parents=True)
+            notes: list[str] = []
+
+            first_path = _map_pack_path(str(first), source_dir="", root=root, gen_dir=generated, short="demo", notes=notes)
+            second_path = _map_pack_path(str(second), source_dir="", root=root, gen_dir=generated, short="demo", notes=notes)
+
+            self.assertNotEqual(first_path, second_path)
+            self.assertEqual(first_path, "/work/harnesses/gen/workspace/targets/c/one/shared.cpp")
+            self.assertEqual(second_path, "/work/harnesses/gen/workspace/targets/c/two/shared.cpp")
+            self.assertIn("first", (generated / "workspace" / "targets" / "c" / "one" / "shared.cpp").read_text())
+            self.assertIn("second", (generated / "workspace" / "targets" / "c" / "two" / "shared.cpp").read_text())
+
+    def test_workspace_include_is_dropped_when_copy_would_recurse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "ws"
+            generated = root / "klee" / "harnesses" / "gen"
+            generated.mkdir(parents=True)
+            notes: list[str] = []
+
+            mapped = _map_pack_path(str(root), source_dir="", root=root, gen_dir=generated, short="demo", notes=notes)
+
+            self.assertIsNone(mapped)
+            self.assertTrue(any("copy destination is inside source" in note for note in notes))
+            self.assertFalse((root / "klee" / "gen-include" / "demo" / "workspace").exists())
 
 
 if __name__ == "__main__":

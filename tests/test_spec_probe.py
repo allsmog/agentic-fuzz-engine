@@ -14,6 +14,13 @@ harness.cpp:(.text+0x10): undefined reference to `mylib::Codec::Decode(char cons
 clang: error: linker command failed
 """
 
+DARWIN_LINK_ERRORS = """\
+Undefined symbols for architecture arm64:
+  "mylib::Codec::Decode(char const*, int)", referenced from:
+      _main in harness.o
+ld: symbol(s) not found for architecture arm64
+"""
+
 HEADER_ERROR = """\
 harness.cpp:3:10: fatal error: 'mylib/api.h' file not found
     3 | #include "mylib/api.h"
@@ -26,6 +33,13 @@ class ClassifyTest(unittest.TestCase):
         kinds = {(item["kind"], item["value"]) for item in errors}
         self.assertIn(("missing-header", "mylib/api.h"), kinds)
         self.assertTrue(any(kind == "undefined-symbol" and "Decode" in value for kind, value in kinds))
+
+    def test_classifies_darwin_undefined_symbol_diagnostic(self) -> None:
+        errors = _classify_errors(DARWIN_LINK_ERRORS)
+        self.assertIn(
+            {"kind": "undefined-symbol", "value": "mylib::Codec::Decode(char const*, int)"},
+            errors,
+        )
 
     def test_syslib_table(self) -> None:
         self.assertEqual(_syslib_for("ZSTD_decompress"), "-lzstd")
