@@ -3,10 +3,11 @@ from __future__ import annotations
 import importlib.util
 import os
 import shutil
-import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+
+from agentic_fuzz_engine.process_safety import bounded_run, docker_client_env
 
 
 LLM_ENV_GROUP = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "GROK_API_KEY")
@@ -439,9 +440,9 @@ def _binary_requirement_ok(name: str, env: Mapping[str, str]) -> bool:
     if not path:
         return False
     if name in {"symcc", "sym++"}:
-        return _docker_wrapper_image_ok(path, env, default_image="eurecoms3/symcc:latest", env_name="AGENTIC_FUZZ_SYMCC_IMAGE", fallback_env_name="AGENTIC_FUZZ_SYMCC_IMAGE")
+        return _docker_wrapper_image_ok(path, env, env_name="AGENTIC_FUZZ_SYMCC_IMAGE", fallback_env_name="AGENTIC_FUZZ_SYMCC_IMAGE")
     if name in {"symqemu", "symqemu-x86_64"}:
-        return _docker_wrapper_image_ok(path, env, default_image="agentic-fuzz/symqemu:latest", env_name="AGENTIC_FUZZ_SYMQEMU_IMAGE", fallback_env_name="AGENTIC_FUZZ_SYMQEMU_IMAGE")
+        return _docker_wrapper_image_ok(path, env, env_name="AGENTIC_FUZZ_SYMQEMU_IMAGE", fallback_env_name="AGENTIC_FUZZ_SYMQEMU_IMAGE")
     return True
 
 
@@ -449,7 +450,6 @@ def _docker_wrapper_image_ok(
     path: str,
     env: Mapping[str, str],
     *,
-    default_image: str,
     env_name: str,
     fallback_env_name: str | None = None,
 ) -> bool:
@@ -461,22 +461,19 @@ def _docker_wrapper_image_ok(
     docker = _which("docker", env)
     if not docker:
         return False
-    image = env.get(env_name) or (env.get(fallback_env_name) if fallback_env_name else None) or default_image
-    try:
-        proc = subprocess.run(
-            [docker, "image", "inspect", image],
-            env=dict(env),
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+    image = env.get(env_name) or (env.get(fallback_env_name) if fallback_env_name else None)
+    if not image or not _is_immutable_image(image):
         return False
-    return proc.returncode == 0
+    try:
+        proc = bounded_run([docker, "image", "inspect", image], env=docker_client_env(env), timeout_seconds=10)
+    except OSError:
+        return False
+    return proc.exit_code == 0
+
+
+def _is_immutable_image(image: str) -> bool:
+    digest = image.rsplit("@sha256:", 1)
+    return len(digest) == 2 and len(digest[1]) == 64 and all(char in "0123456789abcdef" for char in digest[1].lower())
 
 
 def _which(name: str, env: Mapping[str, str]) -> str | None:

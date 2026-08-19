@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .runtime_backends import MAX_RUNTIME_TIMEOUT_SECONDS, _run_command
+from .process_safety import validate_declared_env
 from .scaffold import TARGETS_RELATIVE
 from .workspace import load_workspace, resolve_workspace_root
 
@@ -32,8 +33,12 @@ def build_target(
     only_steps: list[str] | None = None,
     timeout_seconds: int | float = 900,
     env: Mapping[str, str] | None = None,
+    build_env: Mapping[str, str] | None = None,
     config_override: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    # Validate caller/target declarations before filesystem setup or selected
+    # steps can make a skipped build look successful.
+    declared_build_env = validate_declared_env(build_env)
     environment = dict(os.environ if env is None else env)
     timeout = min(float(timeout_seconds), MAX_RUNTIME_TIMEOUT_SECONDS)
     if timeout <= 0:
@@ -61,6 +66,14 @@ def build_target(
         raise ValueError(f"build config has no steps: {build_config_path}")
     if len(steps) > MAX_BUILD_STEPS:
         raise ValueError(f"build config exceeds {MAX_BUILD_STEPS} steps")
+    validated_step_envs: list[dict[str, str]] = []
+    for step in steps:
+        if not isinstance(step, Mapping):
+            raise ValueError("build config steps must be objects")
+        raw_step_env = step.get("env") or {}
+        if not isinstance(raw_step_env, Mapping):
+            raise ValueError("build step env must be an object")
+        validated_step_envs.append(validate_declared_env(raw_step_env))
 
     bin_dir = root / "bin" / name
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -76,7 +89,7 @@ def build_target(
     step_results = []
     blockers = []
     failed = False
-    for step in steps:
+    for step, step_env in zip(steps, validated_step_envs):
         step_name = str(step.get("name") or f"step-{len(step_results)}")
         if selected and step_name not in selected:
             step_results.append({"name": step_name, "skipped": True, "reason": "not selected"})
@@ -90,15 +103,24 @@ def build_target(
             failed = True
             step_results.append({"name": step_name, "skipped": True, "reason": "empty argv"})
             continue
-        step_env = dict(environment)
-        for key, value in (step.get("env") or {}).items():
-            step_env[str(key)] = _substitute(str(value), placeholders)
-        run = _run_command(argv, cwd=target_dir, timeout_seconds=timeout, env=step_env)
+        declared_env = dict(declared_build_env)
+        for key, value in step_env.items():
+            declared_env[key] = _substitute(value, placeholders)
+        try:
+            run = _run_command(
+                argv,
+                cwd=target_dir,
+                timeout_seconds=timeout,
+                env=environment,
+                declared_env=declared_env or None,
+            )
+        except ValueError as exc:
+            run = {"exit_code": 127, "timed_out": False, "elapsed_ms": 0, "stdout": "", "stderr": str(exc), "command": argv}
         ok = run["exit_code"] == 0 and not run["timed_out"]
         step_results.append({"name": step_name, "skipped": False, "ok": ok, "run": run})
         if not ok:
             failed = True
-            reason = "timeout" if run["timed_out"] else f"exit {run['exit_code']}"
+            reason = "timeout" if run["timed_out"] else (str(run.get("stderr") or "") if run["exit_code"] == 127 and "declared environment" in str(run.get("stderr") or "") else f"exit {run['exit_code']}")
             blockers.append(f"{step_name}: {reason}")
 
     artifacts = [

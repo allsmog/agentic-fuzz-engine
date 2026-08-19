@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
 from pathlib import Path
-from time import monotonic
 from typing import Any
 
 from .discovery import discover_local_target
-from .execution import _bounded_timeout, _clip, _coerce_output, _normalize_command, _validate_command
+from .execution import _bounded_timeout, _normalize_command, _validate_command
+from .process_safety import bounded_run, sanitized_env
 
 
 DEFAULT_BUILD_ID = "build-probe"
@@ -40,7 +39,7 @@ def probe_target_build(
         runs.append(run)
         if run["exit_code"] != 0:
             ok = False
-            blocker = "build command failed"
+            blocker = f"build command failed (exit {run['exit_code']}): {' '.join(run['command'][:2])}"
             break
     after = discover_local_target(str(worktree), project=project)
     runnable_harnesses = [harness for harness in after["harnesses"] if harness.get("runnable")]
@@ -74,35 +73,9 @@ def _first_probe_commands(discovery: dict[str, Any]) -> list[list[str]]:
 def _run_build_command(command: list[str], *, cwd: Path, timeout_seconds: float) -> dict[str, Any]:
     argv = _normalize_command(command)
     _validate_command(argv)
-    started = monotonic()
-    try:
-        proc = subprocess.run(
-            argv,
-            cwd=cwd,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-        return {
-            "command": argv,
-            "exit_code": proc.returncode,
-            "timed_out": False,
-            "elapsed_ms": int((monotonic() - started) * 1000),
-            "stdout": _clip(proc.stdout or ""),
-            "stderr": _clip(proc.stderr or ""),
-        }
-    except subprocess.TimeoutExpired as exc:
-        return {
-            "command": argv,
-            "exit_code": 124,
-            "timed_out": True,
-            "elapsed_ms": int((monotonic() - started) * 1000),
-            "stdout": _clip(_coerce_output(exc.stdout)),
-            "stderr": _clip(_coerce_output(exc.stderr) + "\nTIMEOUT"),
-        }
+    proc = bounded_run(argv, cwd=cwd, env=sanitized_env(), timeout_seconds=timeout_seconds)
+    return {"command": argv, "exit_code": proc.exit_code, "timed_out": proc.timed_out,
+            "elapsed_ms": proc.elapsed_ms, "stdout": proc.stdout, "stderr": proc.stderr}
 
 
 def _copy_source(source: Path, destination: Path) -> None:

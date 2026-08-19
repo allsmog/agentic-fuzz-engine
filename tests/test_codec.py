@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,6 +11,9 @@ from pathlib import Path
 from unittest import mock
 
 from agentic_fuzz_engine.codec import load_codec_status, run_codec
+
+# Deliberately opt in to authored-script execution for these tests.
+os.environ["AGENTIC_FUZZ_ALLOW_AUTHORED_SCRIPTS"] = "1"
 
 GOOD_CODEC = """
 import json
@@ -167,15 +169,14 @@ class CodecBootstrapContractTests(unittest.TestCase):
             ws = _workspace(tmp_path, corpus_entries={"a": b"k:v"})
             script = _write_script(tmp_path, GOOD_CODEC)
             captured: dict = {}
-            real_run = subprocess.run
+            from agentic_fuzz_engine.process_safety import bounded_run as real_bounded_run
 
             def spy(argv, **kwargs):
                 captured["argv"] = list(argv)
-                return real_run(argv, **kwargs)
+                return real_bounded_run(argv, **kwargs)
 
-            with mock.patch("agentic_fuzz_engine.codec.subprocess.run", side_effect=spy):
-                with mock.patch("agentic_fuzz_engine.codec.shutil.which", return_value=None):
-                    run_codec(target="demo", mode="validate", script_path=script, workspace_root=ws)
+            with mock.patch("agentic_fuzz_engine.codec.bounded_run", side_effect=spy):
+                run_codec(target="demo", mode="validate", script_path=script, workspace_root=ws)
 
             self.assertEqual(captured["argv"][:2], [sys.executable, "-c"])
             self.assertNotIn(str(script), captured["argv"][:3])

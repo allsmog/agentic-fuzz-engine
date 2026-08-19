@@ -6,7 +6,8 @@ import json
 import os
 import re
 import shutil
-import subprocess
+import stat
+import sys
 from hashlib import sha256
 from pathlib import Path
 from time import monotonic, time as wall_time
@@ -14,12 +15,16 @@ from typing import Any, Mapping
 
 from .execution import FORBIDDEN_ARG_FRAGMENTS, _clip, _normalize_command
 from .patching import validate_unified_diff
-from .workspace import KLEE_IMAGE_ENV, DEFAULT_KLEE_IMAGE, load_workspace, translate_host_path
+from .process_safety import bounded_run, docker_client_env, sanitized_env, tool_env, validate_command_shape, validate_declared_env
+from .workspace import KLEE_IMAGE_ENV, load_workspace, translate_host_path
 
 
 MAX_RUNTIME_TIMEOUT_SECONDS = 3600.0
 MAX_COLLECTED_FILE_BYTES = 1_048_576
 MAX_COLLECTED_FILES = 100
+MAX_Z3_CONSTRAINT_BYTES = 1_048_576
+MAX_Z3_ENCODED_BYTES = ((MAX_Z3_CONSTRAINT_BYTES + 2) // 3) * 4
+MAX_Z3_TIMEOUT_SECONDS = 60.0
 SKIP_SOURCE_DIRS = {".git", "__pycache__", ".pytest_cache", ".cache"}
 
 
@@ -197,7 +202,7 @@ def run_symbolic_worker(
     status = runtime_backend_status(env=environment)["groups"]["symbolic_stack"]["checks"]
 
     if selected_mode == "z3":
-        result = _run_z3_solver(constraints_smt2_b64=constraints_smt2_b64, status=status)
+        result = _run_z3_solver(constraints_smt2_b64=constraints_smt2_b64, status=status, timeout_seconds=timeout)
     elif selected_mode == "symcc":
         result = _run_symcc(command=command, work=work, output_dir=out, timeout_seconds=timeout, status=status, env=environment)
     elif selected_mode == "klee":
@@ -330,7 +335,16 @@ def prepare_patch_environment(
     test_command: list[str] | str | None = None,
     timeout_seconds: int | float = 300,
     env: Mapping[str, str] | None = None,
+    declared_env: Mapping[str, str] | None = None,
+    build_env: Mapping[str, str] | None = None,
+    test_env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    # These are caller declarations, not ambient environment. Validate them
+    # before creating/copying an environment so a no-op call cannot bypass the
+    # control policy.
+    common_declared_env = validate_declared_env(declared_env)
+    validated_build_env = validate_declared_env(build_env)
+    validated_test_env = validate_declared_env(test_env)
     environment = dict(os.environ if env is None else env)
     timeout = _bounded_runtime_timeout(timeout_seconds)
     source = Path(source_dir).expanduser().resolve()
@@ -370,15 +384,15 @@ def prepare_patch_environment(
             changed_paths = validate_unified_diff(patch_text)
             patch_path = env_dir / _safe_name(patch_name or "candidate.patch")
             patch_path.write_bytes(patch_bytes)
-            apply_check = _run_command(["git", "apply", "--check", str(patch_path)], cwd=env_dir, timeout_seconds=timeout, env=environment)
+            apply_check = _run_command(["git", "apply", "--check", str(patch_path)], cwd=env_dir, timeout_seconds=timeout, env=environment, declared_env=common_declared_env or None)
             commands.append({"stage": "apply-check", **apply_check})
             if apply_check["exit_code"] != 0:
-                blockers.append("patch apply check failed")
+                blockers.append(f"patch apply check failed (exit {apply_check['exit_code']})")
             else:
-                apply_run = _run_command(["git", "apply", str(patch_path)], cwd=env_dir, timeout_seconds=timeout, env=environment)
+                apply_run = _run_command(["git", "apply", str(patch_path)], cwd=env_dir, timeout_seconds=timeout, env=environment, declared_env=common_declared_env or None)
                 commands.append({"stage": "apply", **apply_run})
                 if apply_run["exit_code"] != 0:
-                    blockers.append("patch application failed")
+                    blockers.append(f"patch application failed (exit {apply_run['exit_code']})")
             patch_record = {
                 "patch_name": patch_name or patch_path.name,
                 "patch_sha256": patch_sha,
@@ -386,18 +400,20 @@ def prepare_patch_environment(
                 "changed_paths": changed_paths,
             }
 
-    for stage, command in (("build", build_command), ("test", test_command)):
+    for stage, command, stage_env in (("build", build_command, validated_build_env), ("test", test_command, validated_test_env)):
         if command is None:
             continue
+        effective_env = {**common_declared_env, **stage_env}
         run = _run_command(
             _replace_placeholders(_runtime_command(command), {"src": str(env_dir), "env_dir": str(env_dir)}),
             cwd=env_dir,
             timeout_seconds=timeout,
             env=environment,
+            declared_env=effective_env or None,
         )
         commands.append({"stage": stage, **run})
         if run["exit_code"] != 0:
-            blockers.append(f"{stage} command failed")
+            blockers.append(f"{stage} command failed (exit {run['exit_code']})")
 
     manifest = {
         "mode": "real-cached-patch-environment",
@@ -492,7 +508,7 @@ def _run_afl(
         "--",
         *harness_argv,
     ]
-    run = _run_command(argv, cwd=crash_dir.parent, timeout_seconds=timeout_seconds + 15, env=afl_env)
+    run = _run_command(argv, cwd=crash_dir.parent, timeout_seconds=timeout_seconds + 15, env=env, declared_env={name: value for name, value in afl_env.items() if name.startswith("AFL_")})
     return {"worker": "afl", "executed": True, "crash_dir": str(crash_dir), "run": run, "blockers": [] if not run["timed_out"] else ["timeout"]}
 
 
@@ -519,10 +535,19 @@ def _run_libafl(
 
 
 MAX_KLEE_EXTRACTED_TESTS = 2000
+MAX_KLEE_TEST_JSON_BYTES = 4 * 1024 * 1024
+MAX_KLEE_TOTAL_TEST_JSON_BYTES = 32 * 1024 * 1024
+MAX_KLEE_SEED_BYTES = 1 * 1024 * 1024
+MAX_KLEE_TOTAL_SEED_BYTES = 16 * 1024 * 1024
+MAX_KLEE_ERROR_REPORT_BYTES = 1 * 1024 * 1024
+MAX_KLEE_TOTAL_ERROR_REPORT_BYTES = 8 * 1024 * 1024
 MIN_FREE_DISK_GB = 10.0
 DEFAULT_KLEE_MEMORY_GB = 16
 DEFAULT_KLEE_PIDS_LIMIT = 1024
 DEFAULT_KLEE_CPUS = 8
+MAX_KLEE_MEMORY_GB = 64
+MAX_KLEE_PIDS_LIMIT = 4096
+MAX_KLEE_CPUS = 32
 
 
 def check_disk_headroom(path: str | Path, *, min_free_gb: float = MIN_FREE_DISK_GB) -> dict[str, Any]:
@@ -547,22 +572,20 @@ def check_disk_headroom(path: str | Path, *, min_free_gb: float = MIN_FREE_DISK_
 
 
 def _klee_image_check(environment: Mapping[str, str]) -> dict[str, Any]:
-    image = environment.get(KLEE_IMAGE_ENV) or DEFAULT_KLEE_IMAGE
+    image = environment.get(KLEE_IMAGE_ENV)
+    if not image:
+        return {"ok": False, "path": None, "detail": f"set {KLEE_IMAGE_ENV} to an immutable sha256 image digest"}
     docker = shutil.which("docker", path=environment.get("PATH"))
     if not docker:
         return {"ok": False, "path": None, "detail": f"docker not on PATH (image {image})"}
     try:
-        proc = subprocess.run(
-            [docker, "image", "inspect", image, "--format", "{{.Id}}"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        proc = bounded_run([docker, "image", "inspect", image, "--format", "{{.Id}}"], env=docker_client_env(environment), timeout_seconds=15)
+    except OSError as exc:
         return {"ok": False, "path": None, "detail": f"docker image inspect failed: {exc}"}
-    if proc.returncode != 0:
+    if proc.exit_code != 0:
         return {"ok": False, "path": None, "detail": f"image not present: {image}"}
+    if not _is_immutable_image(image):
+        return {"ok": False, "path": None, "detail": f"image must be pinned by a sha256 digest: {image}"}
     return {"ok": True, "path": image, "detail": None}
 
 
@@ -576,8 +599,6 @@ def _run_klee_ng(
     env: Mapping[str, str],
     workspace_root: str | Path | None,
 ) -> dict[str, Any]:
-    if not status["klee_ng"]["ok"]:
-        return {"ok": False, "executed": False, "blockers": [f"missing klee-ng backend: {status['klee_ng'].get('detail')}"]}
     if not klee_config:
         return {"ok": False, "executed": False, "blockers": ["missing klee_config (ci JSON under the workspace klee dir)"]}
     try:
@@ -599,15 +620,20 @@ def _run_klee_ng(
     except ValueError:
         return {"ok": False, "executed": False, "blockers": [f"klee ci config must live under {klee_dir}"]}
 
+    if not status["klee_ng"]["ok"]:
+        return {"ok": False, "executed": False, "blockers": [f"missing klee-ng backend: {status['klee_ng'].get('detail')}"]}
+
     headroom = check_disk_headroom(klee_dir)
     if not headroom["ok"]:
         return {"ok": False, "executed": False, "disk": headroom, "blockers": [headroom["blocker"]]}
 
-    image = str(status["klee_ng"]["path"] or DEFAULT_KLEE_IMAGE)
+    image = str(status["klee_ng"]["path"] or "")
+    if not _is_immutable_image(image):
+        return {"ok": False, "executed": False, "blockers": [f"klee image must be pinned by digest: {image}"]}
     docker_config = workspace.get("docker") or {}
-    memory_gb = int(docker_config.get("klee_memory_gb") or DEFAULT_KLEE_MEMORY_GB)
-    pids_limit = int(docker_config.get("klee_pids_limit") or DEFAULT_KLEE_PIDS_LIMIT)
-    cpus = int(docker_config.get("klee_cpus") or DEFAULT_KLEE_CPUS)
+    memory_gb = min(MAX_KLEE_MEMORY_GB, max(1, int(docker_config.get("klee_memory_gb") or DEFAULT_KLEE_MEMORY_GB)))
+    pids_limit = min(MAX_KLEE_PIDS_LIMIT, max(16, int(docker_config.get("klee_pids_limit") or DEFAULT_KLEE_PIDS_LIMIT)))
+    cpus = min(MAX_KLEE_CPUS, max(1, int(docker_config.get("klee_cpus") or DEFAULT_KLEE_CPUS)))
     mount_args = ["-v", f"{translate_host_path(klee_dir, workspace)}:/work"]
     scripts_dir = klee_dir / "scripts"
     if scripts_dir.is_dir():
@@ -623,13 +649,14 @@ def _run_klee_ng(
         mode = "ro" if str(mount.get("mode", "rw")) == "ro" else "rw"
         mount_args += ["-v", f"{translate_host_path(host, workspace)}:{container}:{mode}"]
 
-    container_name = f"agentic-fuzz-klee-{os.getpid()}-{int(monotonic() * 1000) % 1_000_000}"
+    container_name = f"agentic-fuzz-klee-{os.getpid()}-{int(monotonic() * 1_000_000)}"
     argv = [
-        "docker", "run", "--rm", "--name", container_name,
+        "docker", "run", "--name", container_name,
         f"--memory={memory_gb}g",
         f"--memory-swap={memory_gb}g",
         f"--pids-limit={pids_limit}",
         f"--cpus={cpus}",
+        "--network=none",
         *mount_args,
         image,
         "/opt/klee-ng/src/scripts/klee-ng-ci",
@@ -637,22 +664,35 @@ def _run_klee_ng(
         *(_runtime_command(command) if command else []),
     ]
     wall_started = wall_time()
-    run = _run_command(argv, cwd=klee_dir, timeout_seconds=timeout_seconds, env=env)
-    if run["timed_out"]:
-        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, text=True, timeout=30, check=False)
+    cleanup = None
+    try:
+        run = _run_command(argv, cwd=klee_dir, timeout_seconds=timeout_seconds, env=env)
+    finally:
+        # Force removal owns the lifecycle after a client timeout or daemon
+        # error. A unique name avoids touching another run.
+        cleanup = bounded_run(["docker", "rm", "-f", container_name], env=docker_client_env(env), timeout_seconds=30)
 
     extraction = _extract_klee_tests(klee_dir / "klee-ng-out", output_dir, newer_than=wall_started - 5.0)
-    ok = run["exit_code"] == 0 and not run["timed_out"]
-    blockers = [] if ok else [f"klee-ng ci {'timed out' if run['timed_out'] else 'failed'}"]
+    run_ok = run["exit_code"] == 0 and not run["timed_out"]
+    if run_ok:
+        blockers: list[str] = []
+    else:
+        detail = (str(run.get("stderr") or run.get("stdout") or "").strip().splitlines()[-1:] or ["no diagnostic output"])[0]
+        state = "timed out" if run["timed_out"] else f"failed (exit {run['exit_code']})"
+        blockers = [f"klee-ng ci {state}: {detail[:500]}"]
+    if cleanup is not None and cleanup.exit_code != 0:
+        context = (cleanup.stderr or cleanup.stdout).strip().splitlines()[-1:] or ["no diagnostic output"]
+        blockers.append(f"klee container cleanup failed (exit {cleanup.exit_code}): {context[0][:500]}")
     return {
-        "ok": ok,
+        "ok": not blockers,
         "executed": True,
         "image": image,
         "config": str(config_rel),
         "container": container_name,
-        "limits": {"memory_gb": memory_gb, "pids_limit": pids_limit, "cpus": cpus},
+        "limits": {"memory_gb": memory_gb, "pids_limit": pids_limit, "cpus": cpus, "network": "none"},
         "disk": headroom,
         "run": run,
+        "cleanup": {"exit_code": cleanup.exit_code, "timed_out": cleanup.timed_out, "stdout": _clip(cleanup.stdout), "stderr": _clip(cleanup.stderr)} if cleanup is not None else None,
         "extraction": extraction,
         "blockers": blockers,
     }
@@ -667,68 +707,360 @@ def _extract_klee_tests(out_root: Path, output_dir: Path, *, newer_than: float |
     """
     seeds_dir = output_dir / "seeds"
     errors_dir = output_dir / "errors"
-    seeds_dir.mkdir(parents=True, exist_ok=True)
-    errors_dir.mkdir(parents=True, exist_ok=True)
+    if not _ensure_nofollow_directory(seeds_dir) or not _ensure_nofollow_directory(errors_dir):
+        return {
+            "scanned": 0,
+            "seeds_written": 0,
+            "errors_written": 0,
+            "out_root": str(out_root),
+            "rejected_tests": 0,
+            "rejected_inputs": 0,
+            "rejected_errors": 0,
+            "blockers": ["KLEE extraction output directory is not a regular directory"],
+        }
+    root_fd = _open_nofollow_directory(out_root)
+    seed_fd = _open_nofollow_directory(seeds_dir)
+    error_fd = _open_nofollow_directory(errors_dir)
+    if root_fd is None or seed_fd is None or error_fd is None:
+        for descriptor in (root_fd, seed_fd, error_fd):
+            if descriptor is not None:
+                os.close(descriptor)
+        return {
+            "scanned": 0, "seeds_written": 0, "errors_written": 0,
+            "out_root": str(out_root), "rejected_tests": 0,
+            "rejected_inputs": 0, "rejected_errors": 0,
+            "blockers": ["KLEE extraction directory changed or is a symlink"],
+        }
     seeds = 0
     errors = 0
     scanned = 0
-    if not out_root.is_dir():
-        return {"scanned": 0, "seeds_written": 0, "errors_written": 0, "out_root": str(out_root)}
-    for test_path in sorted(out_root.glob("*/*/test*.json")):
-        if scanned >= MAX_KLEE_EXTRACTED_TESTS:
-            break
-        if newer_than is not None and test_path.stat().st_mtime < newer_than:
-            continue
-        scanned += 1
-        try:
-            payload = json.loads(test_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        label = f"{test_path.parent.parent.name}-{test_path.parent.name}-{test_path.stem}"
-        for input_obj in payload.get("inputs", []):
-            data = input_obj.get("data")
-            if not isinstance(data, list):
-                continue
+    seed_bytes = 0
+    error_bytes = 0
+    rejected_inputs = 0
+    rejected_tests = 0
+    rejected_errors = 0
+    test_json_bytes = 0
+    test_json_bytes_read = 0
+    candidates: list[Path] = []
+    try:
+        for candidate in out_root.glob("*/*/test*.json"):
+            if len(candidates) >= MAX_KLEE_EXTRACTED_TESTS:
+                break
+            candidates.append(candidate)
+        for test_path in sorted(candidates):
+            # Physical reads, including discarded race/malformed candidates,
+            # own this budget. Accepted JSON size is reporting only.
+            remaining_test_bytes = MAX_KLEE_TOTAL_TEST_JSON_BYTES - test_json_bytes_read
+            if remaining_test_bytes <= 0:
+                break
+            scanned += 1
             try:
-                blob = bytes(int(item) & 0xFF for item in data)
-            except (TypeError, ValueError):
+                rel_parts = test_path.relative_to(out_root).parts
+            except ValueError:
+                rejected_tests += 1
                 continue
-            (seeds_dir / f"{label}-{input_obj.get('name', 'input')}.bin").write_bytes(blob)
-            seeds += 1
-        if payload.get("error"):
-            shutil.copy2(test_path, errors_dir / f"{label}.json")
-            errors += 1
-    return {
-        "scanned": scanned,
-        "seeds_written": seeds,
-        "errors_written": errors,
-        "seeds_dir": str(seeds_dir),
-        "errors_dir": str(errors_dir),
-        "out_root": str(out_root),
-    }
+            loaded, bytes_read = _read_nofollow_bounded_at_with_count(
+                root_fd,
+                rel_parts,
+                min(MAX_KLEE_TEST_JSON_BYTES, remaining_test_bytes),
+            )
+            test_json_bytes_read += bytes_read
+            if loaded is None:
+                rejected_tests += 1
+                continue
+            raw_test, test_stat = loaded
+            test_json_bytes += len(raw_test)
+            if newer_than is not None and test_stat.st_mtime < newer_than:
+                continue
+            test_size = len(raw_test)
+            try:
+                payload = json.loads(raw_test.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                rejected_tests += 1
+                continue
+            if not isinstance(payload, dict) or "inputs" not in payload or not isinstance(payload["inputs"], list):
+                rejected_tests += 1
+                continue
+            inputs = payload["inputs"]
+            source_tag = sha256("/".join(rel_parts).encode("utf-8", errors="replace")).hexdigest()[:12]
+            label = _safe_klee_name(f"{test_path.parent.parent.name}-{test_path.parent.name}-{test_path.stem}")
+            for index, input_obj in enumerate(inputs):
+                if not isinstance(input_obj, dict):
+                    rejected_inputs += 1
+                    continue
+                data = input_obj.get("data")
+                if not isinstance(data, list):
+                    rejected_inputs += 1
+                    continue
+                if any(not isinstance(item, int) or isinstance(item, bool) or item < 0 or item > 255 for item in data):
+                    rejected_inputs += 1
+                    continue
+                blob = bytes(data)
+                if type(input_obj.get("size")) is not int or input_obj["size"] != len(blob):
+                    rejected_inputs += 1
+                    continue
+                if len(blob) > MAX_KLEE_SEED_BYTES or seed_bytes + len(blob) > MAX_KLEE_TOTAL_SEED_BYTES:
+                    rejected_inputs += 1
+                    continue
+                output_name = f"{label}-{_safe_klee_name(str(input_obj.get('name', 'input')))}-{index}-{source_tag}-{sha256(blob).hexdigest()[:12]}.bin"
+                if not _write_nofollow_at(seed_fd, output_name, blob):
+                    rejected_inputs += 1
+                    continue
+                seeds += 1
+                seed_bytes += len(blob)
+            if payload.get("error"):
+                if test_size <= MAX_KLEE_ERROR_REPORT_BYTES and error_bytes + test_size <= MAX_KLEE_TOTAL_ERROR_REPORT_BYTES:
+                    if _write_nofollow_at(error_fd, f"{label}-{source_tag}-{sha256(raw_test).hexdigest()[:12]}.json", raw_test):
+                        errors += 1
+                        error_bytes += test_size
+                    else:
+                        rejected_errors += 1
+                else:
+                    rejected_errors += 1
+        return {
+            "scanned": scanned,
+            "seeds_written": seeds,
+            "errors_written": errors,
+            "seeds_dir": str(seeds_dir),
+            "errors_dir": str(errors_dir),
+            "out_root": str(out_root),
+            "test_json_bytes": test_json_bytes,
+            "test_json_bytes_read": test_json_bytes_read,
+            "seed_bytes": seed_bytes,
+            "error_report_bytes": error_bytes,
+            "rejected_tests": rejected_tests,
+            "rejected_inputs": rejected_inputs,
+            "rejected_errors": rejected_errors,
+        }
+    finally:
+        os.close(root_fd)
+        os.close(seed_fd)
+        os.close(error_fd)
 
 
-def _run_z3_solver(*, constraints_smt2_b64: str | None, status: dict[str, Any]) -> dict[str, Any]:
+def _safe_klee_name(value: str) -> str:
+    cleaned = "".join(char if char.isalnum() or char in "._-" else "_" for char in value)
+    cleaned = cleaned.lstrip(".")
+    return cleaned[:120] or "input"
+
+
+def _ensure_nofollow_directory(path: Path) -> bool:
+    # ``output_dir`` is managed output, not an input escape hatch. Check the
+    # managed parent and the requested child with lstat; do not reject an OS
+    # supplied ancestor such as macOS's /private -> /var compatibility link.
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        parent = path.parent.lstat()
+        if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode):
+            return False
+        path.mkdir(parents=True, exist_ok=True)
+        current = path.lstat()
+        return not stat.S_ISLNK(current.st_mode) and stat.S_ISDIR(current.st_mode)
+    except OSError:
+        return False
+
+
+def _open_nofollow_directory(path: Path) -> int | None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        current = os.fstat(descriptor)
+        if not stat.S_ISDIR(current.st_mode):
+            os.close(descriptor)
+            return None
+        return descriptor
+    except OSError:
+        os.close(descriptor)
+        return None
+
+
+def _read_nofollow_bounded(path: Path, limit: int) -> tuple[bytes, os.stat_result] | None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        return _read_open_file_bounded(descriptor, limit)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def _read_nofollow_bounded_at(root_fd: int, parts: tuple[str, ...], limit: int) -> tuple[bytes, os.stat_result] | None:
+    """Read a held path without exposing physical-read accounting to callers."""
+    loaded, _bytes_read = _read_nofollow_bounded_at_with_count(root_fd, parts, limit)
+    return loaded
+
+
+def _read_nofollow_bounded_at_with_count(
+    root_fd: int, parts: tuple[str, ...], limit: int,
+) -> tuple[tuple[bytes, os.stat_result] | None, int]:
+    """Read a no-follow path and return bytes physically read even on reject."""
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return None, 0
+    directory_fd = os.dup(root_fd)
+    file_fd: int | None = None
+    bytes_read = 0
+    try:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        for part in parts[:-1]:
+            next_fd = os.open(part, flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+            if not stat.S_ISDIR(os.fstat(directory_fd).st_mode):
+                return None, bytes_read
+        file_flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            file_flags |= os.O_NOFOLLOW
+        file_fd = os.open(parts[-1], file_flags, dir_fd=directory_fd)
+        loaded, bytes_read = _read_open_file_bounded_with_count(file_fd, limit)
+        if loaded is None:
+            return None, bytes_read
+        _data, held_stat = loaded
+        verify_fd = os.open(parts[-1], file_flags, dir_fd=directory_fd)
+        try:
+            current = os.fstat(verify_fd)
+            if (current.st_dev, current.st_ino, current.st_size) != (held_stat.st_dev, held_stat.st_ino, held_stat.st_size):
+                return None, bytes_read
+        finally:
+            os.close(verify_fd)
+        return loaded, bytes_read
+    except OSError:
+        return None, bytes_read
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(directory_fd)
+
+
+def _read_open_file_bounded(descriptor: int, limit: int) -> tuple[bytes, os.stat_result] | None:
+    loaded, _bytes_read = _read_open_file_bounded_with_count(descriptor, limit)
+    return loaded
+
+
+def _read_open_file_bounded_with_count(
+    descriptor: int, limit: int,
+) -> tuple[tuple[bytes, os.stat_result] | None, int]:
+    bytes_read = 0
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
+            return None, bytes_read
+        expected_size = before.st_size
+        pieces: list[bytes] = []
+        # Do not reserve an extra sentinel byte: callers may pass the
+        # remaining aggregate budget, so an expected-size-plus-one read would
+        # physically consume bytes beyond that budget during a growth race.
+        # The before/after identity and metadata checks below detect growth or
+        # same-size replacement without issuing an over-budget read.
+        remaining = expected_size
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            bytes_read += len(chunk)
+            if not chunk:
+                break
+            pieces.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(pieces)
+        after = os.fstat(descriptor)
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            getattr(before, "st_mtime_ns", int(before.st_mtime * 1_000_000_000)),
+            getattr(before, "st_ctime_ns", int(before.st_ctime * 1_000_000_000)),
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            getattr(after, "st_mtime_ns", int(after.st_mtime * 1_000_000_000)),
+            getattr(after, "st_ctime_ns", int(after.st_ctime * 1_000_000_000)),
+        )
+        if (not stat.S_ISREG(after.st_mode)
+                or after_identity != before_identity
+                or len(data) != expected_size):
+            return None, bytes_read
+        return (data, after), bytes_read
+    except OSError:
+        return None, bytes_read
+
+
+def _write_nofollow_at(directory_fd: int, name: str, data: bytes) -> bool:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(name, flags, 0o600, dir_fd=directory_fd)
+    except OSError:
+        return False
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return True
+    except OSError:
+        try:
+            os.unlink(name, dir_fd=directory_fd)
+        except OSError:
+            pass
+        return False
+
+
+def _run_z3_solver(*, constraints_smt2_b64: str | None, status: dict[str, Any], timeout_seconds: float = 10.0) -> dict[str, Any]:
     if not status["z3"]["ok"]:
         return {"ok": False, "executed": False, "blockers": ["missing z3 Python bindings"]}
     if not constraints_smt2_b64:
         return {"ok": False, "executed": False, "blockers": ["missing SMT-LIB constraints"]}
-    import z3  # type: ignore[import-not-found]
-
-    constraints = base64.b64decode(constraints_smt2_b64.encode("ascii")).decode("utf-8", errors="replace")
-    solver = z3.Solver()
-    solver.from_string(constraints)
-    started = monotonic()
-    check = solver.check()
-    model = solver.model() if check == z3.sat else None
+    if len(constraints_smt2_b64) > MAX_Z3_ENCODED_BYTES:
+        return {"ok": False, "executed": False, "blockers": [f"encoded SMT-LIB constraints exceed {MAX_Z3_ENCODED_BYTES} byte cap"]}
+    try:
+        raw = base64.b64decode(constraints_smt2_b64.encode("ascii"), validate=True)
+    except (ValueError, UnicodeEncodeError) as exc:
+        return {"ok": False, "executed": False, "blockers": [f"invalid SMT-LIB base64: {exc}"]}
+    if len(raw) > MAX_Z3_CONSTRAINT_BYTES:
+        return {"ok": False, "executed": False, "blockers": [f"SMT-LIB constraints exceed {MAX_Z3_CONSTRAINT_BYTES} byte cap"]}
+    wall_timeout = min(MAX_Z3_TIMEOUT_SECONDS, max(0.001, float(timeout_seconds)))
+    bootstrap = (
+        "import base64,json,sys,z3; s=z3.Solver(); s.set(timeout=int(sys.argv[2])); "
+        "s.from_string(base64.b64decode(sys.argv[1]).decode('utf-8')); r=s.check(); "
+        "print(json.dumps({'check':str(r),'model':str(s.model()) if r==z3.sat else None}))"
+    )
+    run = bounded_run([sys.executable, "-c", bootstrap, constraints_smt2_b64, str(max(1, int(wall_timeout * 1000)))], env=sanitized_env(), timeout_seconds=wall_timeout)
+    if run.timed_out:
+        return {"ok": False, "executed": True, "solver": "z3", "check": "unknown", "reason": "wall-time timeout", "elapsed_ms": run.elapsed_ms, "blockers": ["z3 solver timed out"]}
+    if run.exit_code != 0:
+        return {"ok": False, "executed": True, "solver": "z3", "check": "unknown", "reason": run.stderr[-500:] or "solver failed", "elapsed_ms": run.elapsed_ms, "blockers": ["z3 solver failed"]}
+    try:
+        payload = json.loads(run.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError):
+        return {"ok": False, "executed": True, "solver": "z3", "check": "unknown", "reason": "solver returned no parseable result", "elapsed_ms": run.elapsed_ms, "blockers": ["z3 solver returned invalid output"]}
+    check = str(payload.get("check", "unknown"))
     return {
-        "ok": True,
+        "ok": check in {"sat", "unsat"},
         "executed": True,
         "solver": "z3",
-        "check": str(check),
-        "model": str(model) if model is not None else None,
-        "elapsed_ms": int((monotonic() - started) * 1000),
-        "blockers": [],
+        "check": check,
+        "model": payload.get("model"),
+        "reason": None if check in {"sat", "unsat"} else "solver returned unknown",
+        "elapsed_ms": run.elapsed_ms,
+        "blockers": [] if check in {"sat", "unsat"} else ["z3 solver returned unknown"],
     }
 
 
@@ -745,10 +1077,11 @@ def _run_symcc(
         return {"ok": False, "executed": False, "blockers": ["missing symcc"]}
     if command in (None, "", []):
         return {"ok": False, "executed": False, "blockers": ["missing SymCC command"]}
-    sym_env = dict(env)
-    sym_env.setdefault("SYMCC_OUTPUT_DIR", str(output_dir))
+    if status.get("docker_wrapper") and not _is_immutable_image(str(status.get("image") or "")):
+        return {"ok": False, "executed": False, "blockers": ["SymCC wrapper image must be pinned by digest"]}
+    sym_env = {"SYMCC_OUTPUT_DIR": str(output_dir)}
     argv = _replace_placeholders(_runtime_command(command), {"output_dir": str(output_dir), "work_dir": str(work), "symcc": status["symcc"]["path"] or "symcc"})
-    run = _run_command(argv, cwd=work, timeout_seconds=timeout_seconds, env=sym_env)
+    run = _run_command(argv, cwd=work, timeout_seconds=timeout_seconds, env=env, declared_env={"SYMCC_OUTPUT_DIR": sym_env["SYMCC_OUTPUT_DIR"]})
     return {"ok": run["exit_code"] == 0, "executed": True, "run": run, "blockers": [] if run["exit_code"] == 0 else ["SymCC command failed"]}
 
 
@@ -765,13 +1098,14 @@ def _run_symqemu(
         return {"ok": False, "executed": False, "blockers": ["missing symqemu"]}
     if command in (None, "", []):
         return {"ok": False, "executed": False, "blockers": ["missing SymQEMU command"]}
+    if status.get("docker_wrapper") and not _is_immutable_image(str(status.get("image") or "")):
+        return {"ok": False, "executed": False, "blockers": ["SymQEMU wrapper image must be pinned by digest"]}
     symqemu = status["symqemu"]["path"] or "symqemu"
     argv = _replace_placeholders(_runtime_command(command), {"output_dir": str(output_dir), "work_dir": str(work), "symqemu": symqemu})
     if Path(argv[0]).name not in {"symqemu", "symqemu-x86_64"}:
         argv = [symqemu, *argv]
-    sym_env = dict(env)
-    sym_env.setdefault("SYMCC_OUTPUT_DIR", str(output_dir))
-    run = _run_command(argv, cwd=work, timeout_seconds=timeout_seconds, env=sym_env)
+    sym_env = {"SYMCC_OUTPUT_DIR": str(output_dir)}
+    run = _run_command(argv, cwd=work, timeout_seconds=timeout_seconds, env=env, declared_env={"SYMCC_OUTPUT_DIR": sym_env["SYMCC_OUTPUT_DIR"]})
     return {"ok": run["exit_code"] == 0, "executed": True, "run": run, "blockers": [] if run["exit_code"] == 0 else ["SymQEMU command failed"]}
 
 
@@ -897,9 +1231,8 @@ def _materialize_seed_artifacts(seed_artifacts: list[dict[str, str]], seed_dir: 
 
 def _runtime_command(command: list[str] | str) -> list[str]:
     argv = _normalize_command(command)
+    validate_command_shape(argv, context="runtime")
     executable = Path(argv[0]).name
-    if executable in {"bash", "sh", "zsh"} and "-c" in argv[1:]:
-        raise ValueError("runtime command may not use shell -c")
     joined = " ".join(argv)
     for fragment in FORBIDDEN_ARG_FRAGMENTS:
         if fragment in joined:
@@ -942,54 +1275,30 @@ def _run_command(
     timeout_seconds: float,
     env: Mapping[str, str],
     raw_output_parser: Any = None,
+    declared_env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     argv = _runtime_command(command)
-    started = monotonic()
+    # Keep enough bounded raw output for libFuzzer final stats while exposing
+    # only the normal clipped transcript to callers.
+    proc = bounded_run(argv, cwd=cwd, env=tool_env(env, declared=declared_env), timeout_seconds=timeout_seconds, max_output_chars=1_048_576)
     try:
-        proc = subprocess.run(
-            argv,
-            cwd=cwd,
-            env=dict(env),
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
         parsed = None
         if raw_output_parser is not None:
             try:
-                parsed = raw_output_parser(f"{proc.stdout or ''}\n{proc.stderr or ''}")
+                parsed = raw_output_parser(f"{proc.stdout}\n{proc.stderr}")
             except Exception:  # noqa: BLE001 - parser failures must not mask the run
                 parsed = None
         return {
             "command": argv,
             "parsed": parsed,
-            "exit_code": proc.returncode,
-            "timed_out": False,
-            "elapsed_ms": int((monotonic() - started) * 1000),
-            "stdout": _clip(proc.stdout or ""),
-            "stderr": _clip(proc.stderr or ""),
+            "exit_code": proc.exit_code,
+            "timed_out": proc.timed_out,
+            "elapsed_ms": proc.elapsed_ms,
+            "stdout": _clip(proc.stdout),
+            "stderr": _clip(proc.stderr),
         }
-    except FileNotFoundError as exc:
-        return {
-            "command": argv,
-            "exit_code": 127,
-            "timed_out": False,
-            "elapsed_ms": int((monotonic() - started) * 1000),
-            "stdout": "",
-            "stderr": _clip(str(exc)),
-        }
-    except subprocess.TimeoutExpired as exc:
-        return {
-            "command": argv,
-            "exit_code": 124,
-            "timed_out": True,
-            "elapsed_ms": int((monotonic() - started) * 1000),
-            "stdout": _clip(_coerce_output(exc.stdout)),
-            "stderr": _clip(_coerce_output(exc.stderr) + "\nTIMEOUT"),
-        }
+    except OSError as exc:
+        return {"command": argv, "exit_code": 127, "timed_out": False, "elapsed_ms": 0, "stdout": "", "stderr": _clip(str(exc))}
 
 
 def _collect_files(root: Path, *, max_files: int) -> list[dict[str, Any]]:
@@ -1094,7 +1403,6 @@ def _binary_check(name: str, env: Mapping[str, str]) -> dict[str, Any]:
         wrapper = _docker_wrapper_image_check(
             path,
             env,
-            default_image="eurecoms3/symcc:latest",
             env_name="AGENTIC_FUZZ_SYMCC_IMAGE",
             fallback_env_name="AGENTIC_FUZZ_SYMCC_IMAGE",
         )
@@ -1104,7 +1412,6 @@ def _binary_check(name: str, env: Mapping[str, str]) -> dict[str, Any]:
         wrapper = _docker_wrapper_image_check(
             path,
             env,
-            default_image="agentic-fuzz/symqemu:latest",
             env_name="AGENTIC_FUZZ_SYMQEMU_IMAGE",
             fallback_env_name="AGENTIC_FUZZ_SYMQEMU_IMAGE",
         )
@@ -1174,7 +1481,6 @@ def _docker_wrapper_image_check(
     path: str,
     env: Mapping[str, str],
     *,
-    default_image: str,
     env_name: str,
     fallback_env_name: str | None = None,
 ) -> dict[str, Any] | None:
@@ -1188,7 +1494,17 @@ def _docker_wrapper_image_check(
     except ValueError:
         return None
 
-    image = env.get(env_name) or (env.get(fallback_env_name) if fallback_env_name else None) or default_image
+    image = env.get(env_name) or (env.get(fallback_env_name) if fallback_env_name else None)
+    if not image:
+        return {
+            "ok": False,
+            "docker_wrapper": True,
+            "image": None,
+            "image_ok": False,
+            "reason": f"set {env_name} to an immutable sha256 image digest",
+        }
+    if not _is_immutable_image(image):
+        return {"ok": False, "docker_wrapper": True, "image": image, "image_ok": False, "reason": "Docker image must be pinned by a sha256 digest"}
     docker = _which("docker", env)
     if not docker:
         return {
@@ -1199,18 +1515,8 @@ def _docker_wrapper_image_check(
             "reason": "repo-local Docker wrapper requires docker",
         }
     try:
-        proc = subprocess.run(
-            [docker, "image", "inspect", image],
-            env=dict(env),
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        proc = bounded_run([docker, "image", "inspect", image], env=docker_client_env(env), timeout_seconds=10)
+    except OSError as exc:
         return {
             "ok": False,
             "docker_wrapper": True,
@@ -1218,15 +1524,20 @@ def _docker_wrapper_image_check(
             "image_ok": False,
             "reason": f"could not inspect Docker image: {str(exc)[:240]}",
         }
-    if proc.returncode != 0:
+    if proc.exit_code != 0:
         return {
             "ok": False,
             "docker_wrapper": True,
             "image": image,
             "image_ok": False,
-            "reason": f"Docker image is not present: {(proc.stderr or '')[:240]}",
+            "reason": f"Docker image is not present: {proc.stderr[:240]}",
         }
     return {"ok": True, "docker_wrapper": True, "image": image, "image_ok": True}
+
+
+def _is_immutable_image(image: str) -> bool:
+    digest = image.rsplit("@sha256:", 1)
+    return len(digest) == 2 and len(digest[1]) == 64 and all(char in "0123456789abcdef" for char in digest[1].lower())
 
 
 def _codeql_language(language: str) -> str:

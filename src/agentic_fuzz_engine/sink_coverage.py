@@ -20,7 +20,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -28,6 +27,7 @@ from .campaign_rounds import default_asan_options
 from .seed_weights import covered_function_names
 from .sink_scan import PRIMITIVE_WEIGHT, SINK_PRIMITIVES
 from .workspace import load_policy, resolve_workspace_root
+from .process_safety import bounded_run, tool_env
 
 MAX_TIMEOUT_SECONDS = 600.0
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
@@ -116,14 +116,18 @@ def sink_coverage(
         sampled = len(newest)
         corpus_arg = sample_dir
     try:
-        completed = subprocess.run(
+        completed = bounded_run(
             [str(fuzzer), "-runs=0", "-print_coverage=1", str(corpus_arg)],
-            capture_output=True,
-            timeout=timeout,
-            env=environment,
-            cwd=str(root),
+            cwd=root,
+            env=tool_env(environment, declared={key: environment[key] for key in ("ASAN_OPTIONS", "DEBUGINFOD_URLS") if isinstance(environment.get(key), str)}),
+            timeout_seconds=timeout,
+            max_output_chars=MAX_OUTPUT_BYTES,
         )
-    except subprocess.TimeoutExpired:
+    except OSError:
+        completed = None
+    if completed is None or completed.timed_out:
+        if sampled:
+            shutil.rmtree(root / "work" / name / "coverage-sample", ignore_errors=True)
         return _result(
             target, fuzzer, sinks_path, corpus_size,
             blockers=[
@@ -132,10 +136,15 @@ def sink_coverage(
                 + ("" if sampled else " (set frontier.coverage_max_inputs to sample)")
             ],
         )
-    finally:
-        if sampled:
-            shutil.rmtree(root / "work" / name / "coverage-sample", ignore_errors=True)
-    output = (completed.stderr + b"\n" + completed.stdout)[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace")
+    if sampled:
+        shutil.rmtree(root / "work" / name / "coverage-sample", ignore_errors=True)
+    if completed.exit_code != 0:
+        context = (completed.stderr or completed.stdout).strip().splitlines()[-1:] or ["no diagnostic output"]
+        return _result(
+            target, fuzzer, sinks_path, corpus_size,
+            blockers=[f"coverage command failed (exit {completed.exit_code}): {context[0][:500]}"],
+        )
+    output = (completed.stderr + "\n" + completed.stdout)[:MAX_OUTPUT_BYTES]
     covered_names = _covered_function_names(output)
     if not covered_names:
         return _result(

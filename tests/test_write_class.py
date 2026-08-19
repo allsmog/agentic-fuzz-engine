@@ -210,6 +210,17 @@ class SinkCoverageTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertTrue(any("fuzzer binary" in blocker for blocker in result["blockers"]))
 
+    def test_fuzzer_launch_failure_is_not_reported_as_empty_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._workspace(Path(tmp), covered_lines=[])
+            fuzzer = root / "bin" / "demo" / "fuzzer"
+            fuzzer.write_text("#!/bin/sh\necho missing-runtime >&2\nexit 127\n", encoding="utf-8")
+            fuzzer.chmod(fuzzer.stat().st_mode | stat.S_IXUSR)
+            result = sink_coverage(target="localfuzz/c/demo", workspace_root=root)
+            self.assertFalse(result["ok"])
+            self.assertIn("coverage command failed (exit 127)", result["blockers"][0])
+            self.assertIn("missing-runtime", result["blockers"][0])
+
     def test_policy_coverage_max_inputs_samples_corpus(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._workspace(

@@ -5,13 +5,13 @@ import os
 import re
 import shlex
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, Mapping
 
 from .asan import parse_asan_signal
+from .process_safety import bounded_run, sanitized_env, validate_command_shape
 
 
 MAX_TIMEOUT_SECONDS = 60.0
@@ -40,6 +40,7 @@ def run_harness_artifact(
     repetitions: int = 3,
     workdir: str | None = None,
     expected_error_token: str | None = None,
+    declared_env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     timeout = _bounded_timeout(timeout_seconds)
     repeat_count = _bounded_repetitions(repetitions)
@@ -56,7 +57,7 @@ def run_harness_artifact(
         # llvm-symbolizer child blocks at spawn with zero CPU, wedging every
         # replay until the timeout. Frames are symbolized offline (addr2line)
         # in _run_once instead, so dedupe signatures still carry real frames.
-        env = _replay_asan_env()
+        env = _replay_asan_env(declared_env)
 
         runs = [
             _run_once(materialized, timeout_seconds=timeout, workdir=workdir, expected_error_token=expected, env=env)
@@ -85,8 +86,11 @@ def run_harness_artifact(
     }
 
 
-def _replay_asan_env() -> dict[str, str]:
-    env = dict(os.environ)
+def _replay_asan_env(declared_env: Mapping[str, str] | None = None) -> dict[str, str]:
+    # Replays inherit only a short operational allowlist.  In particular this
+    # excludes credentials, dynamic-loader variables, and PYTHON* injection.
+    source = os.environ
+    env = sanitized_env(source, extra=declared_env)
     options = [
         option
         for option in env.get("ASAN_OPTIONS", "").split(":")
@@ -129,14 +133,11 @@ def _offline_symbolize(output: str) -> str:
         if not os.access(module, os.R_OK):
             continue
         try:
-            proc = subprocess.run(
+            proc = bounded_run(
                 [addr2line, "-f", "-C", "-e", module, *(f"0x{offset}" for offset in offsets)],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
+                timeout_seconds=10, env=sanitized_env(os.environ),
             )
-        except (OSError, subprocess.TimeoutExpired):
+        except OSError:
             continue
         lines = proc.stdout.splitlines()
         for index, offset in enumerate(offsets):
@@ -169,26 +170,10 @@ def _run_once(
 ) -> dict[str, Any]:
     started = monotonic()
     try:
-        proc = subprocess.run(
-            command,
-            cwd=workdir or None,
-            env=env,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-        timed_out = False
-        returncode = proc.returncode
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        returncode = 124
-        stdout = _coerce_output(exc.stdout)
-        stderr = _coerce_output(exc.stderr) + "\nTIMEOUT"
+        proc = bounded_run(command, cwd=workdir or None, env=env, timeout_seconds=timeout_seconds)
+        timed_out, returncode, stdout, stderr = proc.timed_out, proc.exit_code, proc.stdout, proc.stderr
+    except OSError as exc:
+        timed_out, returncode, stdout, stderr = False, 127, "", str(exc)
 
     elapsed_ms = int((monotonic() - started) * 1000)
     combined = _clip(stdout + stderr)
@@ -235,11 +220,11 @@ def _materialize_command(command: list[str], poc_path: str) -> list[str]:
 
 
 def _validate_command(command: list[str]) -> None:
+    # This shape policy is a guardrail, not a sandbox.
+    validate_command_shape(command, context="harness")
     executable = Path(command[0]).name
     if executable in FORBIDDEN_EXECUTABLES:
         raise ValueError(f"harness command executable is not allowed: {executable}")
-    if executable in {"bash", "sh", "zsh"} and "-c" in command[1:]:
-        raise ValueError("harness command may not use shell -c")
     joined = " ".join(command)
     for fragment in FORBIDDEN_ARG_FRAGMENTS:
         if fragment in joined:

@@ -19,12 +19,12 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import time
 from pathlib import Path
 from typing import Any, Mapping
 
 from .workspace import resolve_workspace_root
+from .process_safety import bounded_run, tool_env
 
 MAX_INPUTS = 4096
 MAX_PER_INPUT_TIMEOUT = 120.0
@@ -172,19 +172,15 @@ def valgrind_sweep(
         else:
             argv.append(str(entry))
         scanned += 1
-        try:
-            completed = subprocess.run(
-                [valgrind, "-q", f"--error-exitcode={ERROR_EXITCODE}", *argv],
-                capture_output=True,
-                timeout=per_timeout,
-                env=environment,
-                cwd=str(root),
-            )
-        except subprocess.TimeoutExpired:
+        completed = bounded_run([valgrind, "-q", f"--error-exitcode={ERROR_EXITCODE}", *argv], cwd=root, env=tool_env(environment), timeout_seconds=per_timeout, max_output_chars=MAX_OUTPUT_BYTES)
+        if completed.timed_out:
             continue
-        output = completed.stderr[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace")
+        if completed.exit_code not in {0, ERROR_EXITCODE} and completed.exit_code >= 0:
+            context = (completed.stderr or completed.stdout).strip().splitlines()[-1:] or ["no diagnostic output"]
+            return {**result_base, "inputs_scanned": scanned, "blockers": [f"valgrind replay command failed (exit {completed.exit_code}): {context[0][:500]}"]}
+        output = completed.stderr[:MAX_OUTPUT_BYTES]
         errors = parse_valgrind_errors(output)
-        crashed = completed.returncode == ERROR_EXITCODE or completed.returncode < 0
+        crashed = completed.exit_code == ERROR_EXITCODE or completed.exit_code < 0
         if not errors and not crashed:
             continue
         if not errors and crashed:
@@ -196,7 +192,7 @@ def valgrind_sweep(
         hits.append(
             {
                 "input": str(entry),
-                "returncode": completed.returncode,
+                "returncode": completed.exit_code,
                 "worst_kind": worst["kind"] if worst else None,
                 "worst_access": worst.get("access") if worst else None,
                 "worst_size": worst.get("size") if worst else None,

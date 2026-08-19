@@ -110,7 +110,17 @@ def run_corpus_sync(
             argv = [prlimit, f"--as={int(max_memory_mb) * 1_048_576}", "--", *argv]
 
         remaining = max(1.0, time_budget - (monotonic() - started))
-        run = _run_command(argv, cwd=corpus.parent, timeout_seconds=min(per_input, remaining), env=run_env)
+        run = _run_command(
+            argv,
+            cwd=corpus.parent,
+            timeout_seconds=min(per_input, remaining),
+            env=environment,
+            declared_env={
+                "SYMCC_INPUT_FILE": run_env["SYMCC_INPUT_FILE"],
+                "SYMCC_OUTPUT_DIR": run_env["SYMCC_OUTPUT_DIR"],
+                "SYMCC_ENABLE_LINEARIZATION": run_env["SYMCC_ENABLE_LINEARIZATION"],
+            },
+        )
         processed += 1
         if run["exit_code"] not in (0,) and not run["timed_out"]:
             crashes += 1

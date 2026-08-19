@@ -531,7 +531,14 @@ class AgenticFuzzFullRuntimeTests(unittest.TestCase):
             _write_fake_oss_fuzz_helper(oss_fuzz_root)
             _write_fake_docker_replay_binary(bin_dir / "docker")
             old_path = os.environ.get("PATH", "")
+            args_file = tmp_path / "docker-args.txt"
+            capture_marker = tmp_path / ".agentic-fuzz-capture-docker-args"
+            capture_marker.touch()
+            old_tmpdir = os.environ.get("TMPDIR")
+            old_docker_host = os.environ.get("DOCKER_HOST")
             os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
+            os.environ["TMPDIR"] = str(tmp_path)
+            os.environ["DOCKER_HOST"] = "unix:///tmp/agentic-fuzz-test.sock"
             try:
                 engine = AgenticFuzzEngine(data_root=tmp_path / "state", reference_root=reference)
 
@@ -545,11 +552,20 @@ class AgenticFuzzFullRuntimeTests(unittest.TestCase):
                         "build_timeout_seconds": 10,
                         "replay_timeout_seconds": 10,
                         "repetitions": 1,
-                        "runner_image": "fake-runner:latest",
+                        "runner_image": "fake-runner@sha256:" + "0" * 64,
                     },
                 )
+                docker_args = args_file.read_text(encoding="utf-8")
             finally:
                 os.environ["PATH"] = old_path
+                if old_tmpdir is None:
+                    os.environ.pop("TMPDIR", None)
+                else:
+                    os.environ["TMPDIR"] = old_tmpdir
+                if old_docker_host is None:
+                    os.environ.pop("DOCKER_HOST", None)
+                else:
+                    os.environ["DOCKER_HOST"] = old_docker_host
 
         self.assertTrue(result["ok"], result["blockers"])
         self.assertEqual(result["mode"], "owned-oss-fuzz-build-replay")
@@ -559,6 +575,11 @@ class AgenticFuzzFullRuntimeTests(unittest.TestCase):
         self.assertEqual(result["summary"]["coverage_ratio"], 1.0)
         self.assertEqual(result["cases"][0]["status"], "verified")
         self.assertEqual(result["audit"]["fixtures"][0]["status"], "represented")
+        self.assertIn("--network=none", docker_args)
+        self.assertIn("--pids-limit=128", docker_args)
+        self.assertIn("-rss_limit_mb=1024", docker_args)
+        self.assertIn("rm\n-f\nagentic-fuzz-replay-", docker_args)
+        self.assertGreaterEqual(docker_args.count("daemon=unix:///tmp/agentic-fuzz-test.sock"), 2)
 
     def test_project_compatibility_shims_patch_only_owned_build_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1111,6 +1132,10 @@ def _write_fake_docker_replay_binary(path: Path) -> None:
         "\n".join(
             [
                 "#!/bin/sh",
+                "if [ -f \"$TMPDIR/.agentic-fuzz-capture-docker-args\" ]; then",
+                "  printf 'daemon=%s\\n' \"$DOCKER_HOST\" >> \"$TMPDIR/docker-args.txt\"",
+                "  printf '%s\\n' \"$@\" >> \"$TMPDIR/docker-args.txt\"",
+                "fi",
                 "if [ \"$1\" = \"run\" ]; then",
                 "  echo '==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x41414141' >&2",
                 "  echo '    #0 0xaaaa in LLVMFuzzerTestOneInput /src/fuzz.c:7' >&2",

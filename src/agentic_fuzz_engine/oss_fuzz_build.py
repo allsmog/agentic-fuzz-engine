@@ -3,21 +3,24 @@ from __future__ import annotations
 import base64
 import os
 import shutil
-import subprocess
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .asan import parse_asan_signal
 from .fidelity import REFERENCE_PROJECTS_RELATIVE, FixtureBenchmark, discover_reference_benchmarks, resolve_reference_root
+from .process_safety import bounded_run, docker_client_env, tool_env, validate_command_shape
 
 
 DEFAULT_OSS_FUZZ_RELATIVE = Path("fixtures/reference/oss-fuzz")
-DEFAULT_RUNNER_IMAGE = "ghcr.io/agentic-fuzz/base-runner:v1.3.0"
+DEFAULT_RUNNER_IMAGE: str | None = None
 MAX_OUTPUT_CHARS = 12000
 MAX_REPLAY_TIMEOUT_SECONDS = 120.0
 MAX_REPETITIONS = 5
+REPLAY_MEMORY_MB = 1024
+REPLAY_PIDS_LIMIT = 128
+REPLAY_CPUS = 2
 NON_FUZZER_OUTPUTS = {
     "llvm-symbolizer",
     "llvm-cov",
@@ -148,6 +151,7 @@ def run_owned_oss_fuzz_build(
     sanitizer: str = "address",
     engine_name: str = "libfuzzer",
     timeout_seconds: int | float = 900,
+    declared_env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     target = project if project.startswith("localfuzz/") else f"localfuzz/c/{project}"
     project_name = target.removeprefix("localfuzz/c/")
@@ -246,8 +250,8 @@ def run_owned_oss_fuzz_build(
     ]
 
     commands = [
-        _run_command(build_image_command, cwd=oss_root, env=env, timeout_seconds=timeout_seconds),
-        _run_command(build_fuzzers_command, cwd=oss_root, env=env, timeout_seconds=timeout_seconds),
+        _run_command(build_image_command, cwd=oss_root, env=env, timeout_seconds=timeout_seconds, declared_env=declared_env),
+        _run_command(build_fuzzers_command, cwd=oss_root, env=env, timeout_seconds=timeout_seconds, declared_env=declared_env),
     ]
     if not all(command["ok"] for command in commands):
         blockers.append("OSS-Fuzz helper build failed")
@@ -295,13 +299,30 @@ def run_owned_oss_fuzz_build_replay(
     build_timeout_seconds: int | float = 900,
     replay_timeout_seconds: int | float = 30,
     repetitions: int = 1,
-    runner_image: str = DEFAULT_RUNNER_IMAGE,
+    runner_image: str | None = DEFAULT_RUNNER_IMAGE,
     record_findings: bool = True,
     include_disabled: bool = False,
+    declared_env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     target = project if project.startswith("localfuzz/") else f"localfuzz/c/{project}"
     project_name = target.removeprefix("localfuzz/c/")
     active_run_id = run_id or f"oss-fuzz-build-replay-{project_name}"
+    if not runner_image:
+        return {
+            "ok": False,
+            "mode": "owned-oss-fuzz-build-replay",
+            "project": project_name,
+            "run_id": active_run_id,
+            "blockers": ["runner image must be explicitly configured with a sha256 digest"],
+        }
+    if not _is_immutable_image(runner_image):
+        return {
+            "ok": False,
+            "mode": "owned-oss-fuzz-build-replay",
+            "project": project_name,
+            "run_id": active_run_id,
+            "blockers": ["runner image must be pinned by digest"],
+        }
     build = run_owned_oss_fuzz_build(
         engine,
         project=target,
@@ -312,6 +333,7 @@ def run_owned_oss_fuzz_build_replay(
         sanitizer=sanitizer,
         engine_name=engine_name,
         timeout_seconds=build_timeout_seconds,
+        declared_env=declared_env,
     )
     build_summary = build.get("summary") if isinstance(build.get("summary"), dict) else {}
     root = resolve_reference_root(engine.reference_root)
@@ -811,35 +833,16 @@ def _insert_once(path: Path, *, marker: str, needle: str, insertion: str) -> boo
     return True
 
 
-def _run_command(command: list[str], *, cwd: Path, env: dict[str, str], timeout_seconds: int | float) -> dict[str, Any]:
-    try:
-        proc = subprocess.run(
-            command,
-            cwd=str(cwd),
-            env=env,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            timeout=float(timeout_seconds),
-            check=False,
-        )
-        timed_out = False
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
-        returncode = proc.returncode
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        stdout = _coerce_output(exc.stdout)
-        stderr = _coerce_output(exc.stderr) + "\nTIMEOUT"
-        returncode = 124
+def _run_command(command: list[str], *, cwd: Path, env: dict[str, str], timeout_seconds: int | float, declared_env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    validate_command_shape(command, context="OSS-Fuzz")
+    proc = bounded_run(command, cwd=cwd, env=tool_env(env, declared=declared_env), timeout_seconds=float(timeout_seconds))
     return {
-        "ok": returncode == 0,
+        "ok": proc.exit_code == 0,
         "command": command,
-        "exit_code": returncode,
-        "timed_out": timed_out,
-        "stdout": _clip(stdout),
-        "stderr": _clip(stderr),
+        "exit_code": proc.exit_code,
+        "timed_out": proc.timed_out,
+        "stdout": _clip(proc.stdout),
+        "stderr": _clip(proc.stderr),
     }
 
 
@@ -848,17 +851,34 @@ def _run_docker_replay(
     out_dir: Path,
     benchmark: FixtureBenchmark,
     docker_platform: str,
-    runner_image: str,
+    runner_image: str | None,
     env: dict[str, str],
     timeout_seconds: float,
     repetitions: int,
 ) -> dict[str, Any]:
+    if not runner_image:
+        return {"ok": False, "verified": False, "command": [], "timeout_seconds": timeout_seconds,
+                "repetitions": repetitions, "matches_expected": 0, "expected_error_token": benchmark.error_token,
+                "observed_error_token": None, "crash_output": "", "runs": [],
+                "blockers": ["runner image must be explicitly configured with a sha256 digest"]}
+    if not _is_immutable_image(runner_image):
+        return {"ok": False, "verified": False, "command": [], "timeout_seconds": timeout_seconds,
+                "repetitions": repetitions, "matches_expected": 0, "expected_error_token": benchmark.error_token,
+                "observed_error_token": None, "crash_output": "", "runs": [],
+                "blockers": ["runner image must be pinned by digest"]}
+    container_name = f"agentic-fuzz-replay-{os.getpid()}-{int(__import__('time').monotonic() * 1_000_000)}"
     command = [
         "docker",
         "run",
-        "--rm",
         "--platform",
         docker_platform,
+        "--name",
+        container_name,
+        f"--memory={REPLAY_MEMORY_MB}m",
+        f"--memory-swap={REPLAY_MEMORY_MB}m",
+        f"--pids-limit={REPLAY_PIDS_LIMIT}",
+        f"--cpus={REPLAY_CPUS}",
+        "--network=none",
         "-v",
         f"{out_dir.resolve()}:/out:ro",
         "-v",
@@ -866,19 +886,20 @@ def _run_docker_replay(
         runner_image,
         f"/out/{benchmark.harness}",
         "-runs=1",
-        "-rss_limit_mb=0",
+        f"-rss_limit_mb={REPLAY_MEMORY_MB}",
         "/testcase/proof.bin",
     ]
     runs = [
-        _run_docker_once(command, env=env, timeout_seconds=timeout_seconds, expected_error_token=benchmark.error_token)
+        _run_docker_once(command, container_name=container_name, env=env, timeout_seconds=timeout_seconds, expected_error_token=benchmark.error_token)
         for _ in range(repetitions)
     ]
     matching = [run for run in runs if run["matched_expected"]]
+    run_blockers = [blocker for run in runs for blocker in run.get("blockers", [])]
     first_crash = next((run for run in runs if run["asan_signal"]), None)
     first_run = runs[0] if runs else {}
     return {
-        "ok": True,
-        "verified": len(matching) == repetitions,
+        "ok": not run_blockers,
+        "verified": len(matching) == repetitions and not run_blockers,
         "command": command,
         "timeout_seconds": timeout_seconds,
         "repetitions": repetitions,
@@ -887,53 +908,57 @@ def _run_docker_replay(
         "observed_error_token": first_crash.get("observed_error_token") if first_crash else None,
         "crash_output": str(first_crash.get("combined_output") if first_crash else first_run.get("combined_output") or ""),
         "runs": runs,
+        "blockers": run_blockers,
+        "limits": {"memory_mb": REPLAY_MEMORY_MB, "pids_limit": REPLAY_PIDS_LIMIT, "cpus": REPLAY_CPUS, "network": "none", "rss_limit_mb": REPLAY_MEMORY_MB},
     }
 
 
 def _run_docker_once(
     command: list[str],
     *,
+    container_name: str,
     env: dict[str, str],
     timeout_seconds: float,
     expected_error_token: str,
 ) -> dict[str, Any]:
+    cleanup = None
     try:
-        proc = subprocess.run(
-            command,
-            env=env,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-        timed_out = False
-        returncode = proc.returncode
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        returncode = 124
-        stdout = _coerce_output(exc.stdout)
-        stderr = _coerce_output(exc.stderr) + "\nTIMEOUT"
+        proc = bounded_run(command, env=docker_client_env(env), timeout_seconds=timeout_seconds)
+    finally:
+        # Force cleanup owns the container lifecycle, including client timeout.
+        cleanup = bounded_run(["docker", "rm", "-f", container_name], env=docker_client_env(env), timeout_seconds=30)
+    timed_out, returncode, stdout, stderr = proc.timed_out, proc.exit_code, proc.stdout, proc.stderr
 
     combined = _clip(stdout + stderr)
     signal = parse_asan_signal(combined)
     normalized_output = _normalize_asan_token(combined)
     expected = _normalize_asan_token(expected_error_token)
     matched_expected = expected in normalized_output
+    blockers: list[str] = []
+    if returncode != 0 and not signal:
+        context = (stderr or stdout).strip().splitlines()[-1:] or ["no diagnostic output"]
+        blockers.append(f"docker replay launch failed (exit {returncode}): {context[0][:500]}")
+    if cleanup is not None and cleanup.exit_code != 0:
+        context = (cleanup.stderr or cleanup.stdout).strip().splitlines()[-1:] or ["no diagnostic output"]
+        blockers.append(f"docker cleanup failed (exit {cleanup.exit_code}): {context[0][:500]}")
     return {
         "exit_code": returncode,
         "timed_out": timed_out,
         "crashed": returncode != 0 and signal is not None,
-        "matched_expected": matched_expected,
+        "matched_expected": returncode != 0 and matched_expected,
         "observed_error_token": f"AddressSanitizer: {signal.crash_type}" if signal else None,
         "asan_signal": signal.to_dict() if signal else None,
         "stdout": _clip(stdout),
         "stderr": _clip(stderr),
         "combined_output": combined,
+        "cleanup": {"exit_code": cleanup.exit_code, "timed_out": cleanup.timed_out, "stdout": _clip(cleanup.stdout), "stderr": _clip(cleanup.stderr)} if cleanup is not None else None,
+        "blockers": blockers,
     }
+
+
+def _is_immutable_image(image: str) -> bool:
+    digest = image.rsplit("@sha256:", 1)
+    return len(digest) == 2 and len(digest[1]) == 64 and all(char in "0123456789abcdef" for char in digest[1].lower())
 
 
 def _built_fuzzers(out_dir: Path) -> list[dict[str, Any]]:

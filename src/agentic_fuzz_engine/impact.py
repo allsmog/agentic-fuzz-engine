@@ -73,6 +73,7 @@ def finding_impact(
     environment.setdefault("ASAN_OPTIONS", "detect_leaks=0:allocator_may_return_null=1:symbolize=0")
     environment.setdefault("UBSAN_OPTIONS", "print_stacktrace=0:halt_on_error=0")
     environment.setdefault("DEBUGINFOD_URLS", "")
+    replay_controls = {key: environment[key] for key in ("ASAN_OPTIONS", "UBSAN_OPTIONS", "DEBUGINFOD_URLS")}
 
     finding = next(
         (item for item in state.finding_list(run_id) if item.get("finding_id") == finding_id),
@@ -112,7 +113,7 @@ def finding_impact(
     # UBSan lane: wraps on the crash path make downstream guards vacuous.
     ubsan_bin = workspace_root / "bin" / name / "fuzzer-ubsan"
     if pov is not None and ubsan_bin.is_file() and os.access(ubsan_bin, os.X_OK):
-        run = _run_command([str(ubsan_bin), str(pov)], cwd=workspace_root, timeout_seconds=replay_timeout_seconds, env=environment)
+        run = _run_command([str(ubsan_bin), str(pov)], cwd=workspace_root, timeout_seconds=replay_timeout_seconds, env=environment, declared_env=replay_controls)
         text = str(run.get("stdout") or "") + "\n" + str(run.get("stderr") or "")
         for match in list(UBSAN_LINE_RE.finditer(text))[:MAX_UBSAN_LINES]:
             block["ubsan_wraps"].append(
@@ -140,6 +141,7 @@ def finding_impact(
                 cwd=workspace_root,
                 timeout_seconds=replay_timeout_seconds,
                 env=environment,
+                declared_env=replay_controls,
             )
             errors = parse_valgrind_errors(str(run.get("stderr") or ""))
             worst = worst_error(errors)
@@ -160,13 +162,13 @@ def finding_impact(
     if pov is not None and profiles_payload and fuzzer_bin.is_file() and os.access(fuzzer_bin, os.X_OK):
         matrix: dict[str, str] = {}
         for profile_name in sorted(profiles_payload["profiles"]):
-            profile_env = dict(environment)
-            profile_env["FUZZ_FLAG_PROFILE"] = profile_name
+            profile_env = {**replay_controls, "FUZZ_FLAG_PROFILE": profile_name}
             run = _run_command(
                 [str(fuzzer_bin), str(pov)],
                 cwd=workspace_root,
                 timeout_seconds=replay_timeout_seconds,
-                env=profile_env,
+                env=environment,
+                declared_env=profile_env,
             )
             text_out = str(run.get("stdout") or "") + str(run.get("stderr") or "")
             if run.get("timed_out"):

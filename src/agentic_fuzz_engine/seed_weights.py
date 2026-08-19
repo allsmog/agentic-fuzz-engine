@@ -29,7 +29,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import tempfile
 import time
 from hashlib import sha256
@@ -37,6 +36,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .sink_scan import PRIMITIVE_WEIGHT
+from .process_safety import bounded_run, tool_env
 
 SEED_COV_FILE = "seed-cov.jsonl"
 SEED_COV_STATE_FILE = "seed-cov-state.json"
@@ -97,17 +97,17 @@ def replay_entry_coverage(
                 os.link(entry, staged)
             except OSError:
                 shutil.copyfile(entry, staged)
-            completed = subprocess.run(
-                [str(fuzzer), "-runs=0", "-print_coverage=1", staging],
-                capture_output=True,
-                timeout=max(1.0, float(timeout)),
-                env=environment,
+            completed = bounded_run(
+                [str(fuzzer), "-runs=0", "-print_coverage=1", str(staging)],
+                env=tool_env(environment, declared={key: environment[key] for key in ("ASAN_OPTIONS", "DEBUGINFOD_URLS") if isinstance(environment.get(key), str)}),
+                timeout_seconds=max(1.0, float(timeout)),
+                max_output_chars=1_048_576,
             )
-    except (subprocess.TimeoutExpired, OSError):
+    except OSError:
         return None
-    output = ((completed.stderr or b"") + b"\n" + (completed.stdout or b"")).decode(
-        "utf-8", errors="replace"
-    )
+    if completed.timed_out or completed.exit_code == 127:
+        return None
+    output = completed.stderr + "\n" + completed.stdout
     return covered_function_names(output)
 
 

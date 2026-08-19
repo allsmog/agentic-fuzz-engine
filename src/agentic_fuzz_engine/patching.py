@@ -3,14 +3,13 @@ from __future__ import annotations
 import base64
 import json
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from hashlib import sha256
-from time import monotonic
-from typing import Any
+from typing import Any, Mapping
 
-from .execution import _bounded_timeout, _clip, _normalize_command, _validate_command, run_harness_artifact
+from .execution import _bounded_timeout, _normalize_command, _validate_command, run_harness_artifact
+from .process_safety import bounded_run, tool_env
 
 
 MAX_PATCH_BYTES = 512_000
@@ -66,6 +65,7 @@ def grade_patch_artifact(
     test_command: list[str] | str | None = None,
     reattack_artifacts: list[dict[str, str]] | None = None,
     reattack_command: list[str] | str | None = None,
+    declared_env: Mapping[str, str] | None = None,
     timeout_seconds: int | float = 10,
     repetitions: int = 3,
 ) -> dict[str, Any]:
@@ -84,17 +84,17 @@ def grade_patch_artifact(
         patch_path = Path(tmp) / _safe_name(patch_name)
         patch_path.write_bytes(patch_bytes)
 
-        apply_check = _run_command(["git", "apply", "--check", str(patch_path)], cwd=work_source, timeout_seconds=timeout)
+        apply_check = _run_command(["git", "apply", "--check", str(patch_path)], cwd=work_source, timeout_seconds=timeout, declared_env=declared_env)
         if apply_check["exit_code"] != 0:
             return _verdict(False, "APPLY_FAIL", work_source, patch_name, apply_check=apply_check)
 
-        apply_run = _run_command(["git", "apply", str(patch_path)], cwd=work_source, timeout_seconds=timeout)
+        apply_run = _run_command(["git", "apply", str(patch_path)], cwd=work_source, timeout_seconds=timeout, declared_env=declared_env)
         if apply_run["exit_code"] != 0:
             return _verdict(False, "APPLY_FAIL", work_source, patch_name, apply_check=apply_check, apply=apply_run)
 
         build_run = None
         if build_command is not None:
-            build_run = _run_command(_materialize_src_command(build_command, work_source), cwd=work_source, timeout_seconds=timeout)
+            build_run = _run_command(_materialize_src_command(build_command, work_source), cwd=work_source, timeout_seconds=timeout, declared_env=declared_env)
             if build_run["exit_code"] != 0:
                 return _verdict(False, "BUILD_FAIL", work_source, patch_name, apply_check=apply_check, apply=apply_run, build=build_run)
 
@@ -107,6 +107,7 @@ def grade_patch_artifact(
             repetitions=repetitions,
             workdir=str(work_source),
             expected_error_token=expected_error_token,
+            declared_env=declared_env,
         )
         if pov_run["matches_expected"] > 0 or pov_run["crashes"] > 0:
             return _verdict(
@@ -122,7 +123,7 @@ def grade_patch_artifact(
 
         tests_run = None
         if test_command is not None:
-            tests_run = _run_command(_materialize_src_command(test_command, work_source), cwd=work_source, timeout_seconds=timeout)
+            tests_run = _run_command(_materialize_src_command(test_command, work_source), cwd=work_source, timeout_seconds=timeout, declared_env=declared_env)
             if tests_run["exit_code"] != 0:
                 return _verdict(
                     False,
@@ -146,6 +147,7 @@ def grade_patch_artifact(
                 repetitions=repetitions,
                 workdir=str(work_source),
                 expected_error_token=expected_error_token,
+                declared_env=declared_env,
             )
             reattack_runs.append({"artifact": artifact["name"], "run": reattack_run})
             if reattack_run["matches_expected"] > 0 or reattack_run["crashes"] > 0:
@@ -183,38 +185,12 @@ def _copy_source(source: Path, destination: Path) -> None:
     shutil.copytree(source, destination, ignore=ignore)
 
 
-def _run_command(command: list[str], *, cwd: Path, timeout_seconds: float) -> dict[str, Any]:
+def _run_command(command: list[str], *, cwd: Path, timeout_seconds: float, declared_env: Mapping[str, str] | None = None) -> dict[str, Any]:
     argv = _normalize_command(command)
     _validate_command(argv)
-    started = monotonic()
-    try:
-        proc = subprocess.run(
-            argv,
-            cwd=cwd,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-        return {
-            "command": argv,
-            "exit_code": proc.returncode,
-            "timed_out": False,
-            "elapsed_ms": int((monotonic() - started) * 1000),
-            "stdout": _clip(proc.stdout or ""),
-            "stderr": _clip(proc.stderr or ""),
-        }
-    except subprocess.TimeoutExpired as exc:
-        return {
-            "command": argv,
-            "exit_code": 124,
-            "timed_out": True,
-            "elapsed_ms": int((monotonic() - started) * 1000),
-            "stdout": _clip(_coerce_output(exc.stdout)),
-            "stderr": _clip(_coerce_output(exc.stderr) + "\nTIMEOUT"),
-        }
+    proc = bounded_run(argv, cwd=cwd, env=tool_env(declared=declared_env), timeout_seconds=timeout_seconds)
+    return {"command": argv, "exit_code": proc.exit_code, "timed_out": proc.timed_out,
+            "elapsed_ms": proc.elapsed_ms, "stdout": proc.stdout, "stderr": proc.stderr}
 
 
 def _materialize_src_command(command: list[str] | str, source: Path) -> list[str]:

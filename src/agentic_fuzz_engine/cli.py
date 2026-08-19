@@ -288,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
     oss_fuzz_replay.add_argument("--build-timeout-seconds", type=float, default=900)
     oss_fuzz_replay.add_argument("--replay-timeout-seconds", type=float, default=30)
     oss_fuzz_replay.add_argument("--repetitions", type=int, default=1)
-    oss_fuzz_replay.add_argument("--runner-image", default="ghcr.io/agentic-fuzz/base-runner:v1.3.0")
+    oss_fuzz_replay.add_argument("--runner-image", default=None, help="immutable runner image reference (name@sha256:<digest>), required")
     oss_fuzz_replay.add_argument("--include-disabled", action="store_true")
     oss_fuzz_replay.add_argument("--no-record-findings", action="store_true")
     oss_fuzz_replay.add_argument("--summary-only", action="store_true")

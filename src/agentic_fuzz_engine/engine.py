@@ -378,6 +378,7 @@ class AgenticFuzzEngine:
                     "test_command": "array",
                     "reattack_artifacts": "array",
                     "reattack_command": "array",
+                    "declared_env": "object",
                     "timeout_seconds": "number",
                     "repetitions": "integer",
                 },
@@ -413,7 +414,7 @@ class AgenticFuzzEngine:
             _tool(
                 "target_build",
                 "Run the target's declared bounded build steps from .localfuzz/build.json and report bin artifacts.",
-                {"project": "string", "only_steps": "array", "timeout_seconds": "number", "workspace_root": "string"},
+                {"project": "string", "only_steps": "array", "timeout_seconds": "number", "workspace_root": "string", "declared_env": "object"},
             ),
             _tool(
                 "klee_pack_gen",
@@ -606,6 +607,9 @@ class AgenticFuzzEngine:
                     "patch_artifact": "string",
                     "build_command": "array",
                     "test_command": "array",
+                    "declared_env": "object",
+                    "build_env": "object",
+                    "test_env": "object",
                     "timeout_seconds": "number",
                 },
             ),
@@ -654,6 +658,7 @@ class AgenticFuzzEngine:
                     "docker_platform": "string",
                     "sanitizer": "string",
                     "engine": "string",
+                    "declared_env": "object",
                     "timeout_seconds": "number",
                 },
             ),
@@ -672,6 +677,7 @@ class AgenticFuzzEngine:
                     "replay_timeout_seconds": "number",
                     "repetitions": "integer",
                     "runner_image": "string",
+                    "declared_env": "object",
                     "record_findings": "boolean",
                     "include_disabled": "boolean",
                 },
@@ -1211,6 +1217,7 @@ class AgenticFuzzEngine:
             workspace_root=args.get("workspace_root") or None,
             only_steps=_string_list(args.get("only_steps"), key="only_steps") or None,
             timeout_seconds=args.get("timeout_seconds", 900),
+            build_env=_declared_tool_env(args),
         )
 
     def _klee_pack_gen(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -1628,6 +1635,9 @@ class AgenticFuzzEngine:
             build_command=_optional_command(args.get("build_command")),
             test_command=_optional_command(args.get("test_command")),
             timeout_seconds=args.get("timeout_seconds", 300),
+            declared_env=_declared_tool_env(args),
+            build_env=_mapping_string_arg(args.get("build_env"), key="build_env"),
+            test_env=_mapping_string_arg(args.get("test_env"), key="test_env"),
         )
         self.state.event_append(
             run_id,
@@ -1713,6 +1723,7 @@ class AgenticFuzzEngine:
             sanitizer=str(args.get("sanitizer") or "address"),
             engine_name=str(args.get("engine") or "libfuzzer"),
             timeout_seconds=args.get("timeout_seconds", 900),
+            declared_env=_declared_tool_env(args),
         )
 
     def _fidelity_oss_fuzz_build_replay(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -1728,9 +1739,10 @@ class AgenticFuzzEngine:
             build_timeout_seconds=args.get("build_timeout_seconds", 900),
             replay_timeout_seconds=args.get("replay_timeout_seconds", 30),
             repetitions=int(args.get("repetitions", 1)),
-            runner_image=str(args.get("runner_image") or "ghcr.io/agentic-fuzz/base-runner:v1.3.0"),
+            runner_image=str(args.get("runner_image") or ""),
             record_findings=bool(args.get("record_findings", True)),
             include_disabled=bool(args.get("include_disabled", False)),
+            declared_env=_declared_tool_env(args),
         )
 
     def _artifact_put(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -2848,6 +2860,7 @@ class AgenticFuzzEngine:
             test_command=_optional_command(args.get("test_command")),
             reattack_artifacts=reattack_artifacts,
             reattack_command=_optional_command(args.get("reattack_command")),
+            declared_env=_declared_tool_env(args),
             timeout_seconds=args.get("timeout_seconds", 10),
             repetitions=int(args.get("repetitions", 3)),
         )
@@ -2958,6 +2971,18 @@ def _optional_command(value: Any) -> list[str] | str | None:
     if value in (None, "", []):
         return None
     return _command_arg(value)
+
+
+def _declared_tool_env(args: dict[str, Any]) -> dict[str, str] | None:
+    return _mapping_string_arg(args.get("declared_env"), key="declared_env")
+
+
+def _mapping_string_arg(value: Any, *, key: str) -> dict[str, str] | None:
+    if value in (None, {}):
+        return None
+    if not isinstance(value, dict) or not all(isinstance(name, str) and isinstance(item, str) for name, item in value.items()):
+        raise ValueError(f"{key} must be an object of string keys and values")
+    return dict(value)
 
 
 def _command_sequence_arg(value: Any) -> list[list[str]] | None:

@@ -10,6 +10,8 @@ provenance in ``work/<target>/seedgen.jsonl``.
 The child process is launched as ``python -c <bootstrap> <script> ...`` so the
 authored file is loaded via importlib rather than passed as the interpreter's
 script argument (endpoint protection on some hosts kills ``python file.py``).
+The server opt-in authorizes trusted authored code; this envelope is not a
+sandbox for hostile scripts.
 """
 
 from __future__ import annotations
@@ -18,13 +20,13 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any, Mapping
 
 from .workspace import resolve_workspace_root
+from .process_safety import AUTHORED_SCRIPTS_OPT_IN, authored_scripts_enabled, bounded_run, sanitized_env
 
 MAX_COUNT = 4096
 MAX_BLOB_BYTES_CAP = 8 * 1024 * 1024
@@ -37,10 +39,21 @@ from pathlib import Path
 
 script, out_dir = sys.argv[1], Path(sys.argv[2])
 count, base_seed, max_bytes = int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
-mode, samples_dir = sys.argv[6], sys.argv[7]
-spec = importlib.util.spec_from_file_location("seedgen_authored", script)
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
+mode, samples_dir, memory_bytes = sys.argv[6], sys.argv[7], int(sys.argv[8])
+try:
+    import resource
+    resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+except (ImportError, OSError, ValueError):
+    pass
+try:
+    spec = importlib.util.spec_from_file_location("seedgen_authored", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("could not load script")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+except BaseException as exc:
+    print(json.dumps({"fatal": f"script load failed: {type(exc).__name__}: {exc}"}))
+    raise SystemExit(3)
 samples = []
 if mode == "mutate":
     mutate = getattr(module, "mutate", None)
@@ -99,6 +112,11 @@ def run_seedgen(
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     environment = dict(env) if env is not None else dict(os.environ)
+    if not authored_scripts_enabled(environment):
+        return _result(
+            str(target).strip().rstrip("/").split("/")[-1], Path(script_path).expanduser(),
+            blockers=[f"authored seedgen execution is disabled; set {AUTHORED_SCRIPTS_OPT_IN}=1 in the server environment"],
+        )
     root = resolve_workspace_root(workspace_root, env=environment)
     name = str(target).strip().rstrip("/").split("/")[-1]
     blockers: list[str] = []
@@ -157,30 +175,10 @@ def run_seedgen(
         str(max_blob_bytes),
         mode,
         str(samples_dir) if mode == "mutate" else "-",
+        str(max(64, int(memory_mb)) * 1024 * 1024),
     ]
-    prlimit = shutil.which("prlimit")
-    if prlimit:
-        argv = [prlimit, f"--as={int(memory_mb) * 1024 * 1024}", "--", *argv]
-
-    started = time.monotonic()
-    timed_out = False
-    try:
-        proc = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=max_seconds,
-            check=False,
-        )
-        exit_code, stdout, stderr = proc.returncode, proc.stdout or "", proc.stderr or ""
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        exit_code = 124
-        stdout = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        stderr = exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-    elapsed_ms = int((time.monotonic() - started) * 1000)
+    proc = bounded_run(argv, env=sanitized_env(environment), timeout_seconds=max_seconds)
+    timed_out, exit_code, stdout, stderr, elapsed_ms = proc.timed_out, proc.exit_code, proc.stdout, proc.stderr, proc.elapsed_ms
 
     child_report: dict[str, Any] = {}
     for line in reversed(stdout.strip().splitlines()):
@@ -200,13 +198,33 @@ def run_seedgen(
     merged_new = 0
     generated = 0
     blob_names: list[str] = []
-    for entry in sorted(staging.iterdir()):
-        if not entry.is_file():
+    staged_entries = sorted(staging.iterdir())
+    if len(staged_entries) > count:
+        blockers.append(f"seedgen staging exceeded requested blob count ({len(staged_entries)} > {count})")
+    for entry in staged_entries[:count]:
+        try:
+            stat = entry.lstat()
+        except OSError:
+            blockers.append(f"seedgen staging entry could not be inspected: {entry.name}")
+            continue
+        if not entry.is_file() or entry.is_symlink():
+            blockers.append(f"seedgen staging entry is not a regular file: {entry.name}")
+            continue
+        if stat.st_size <= 0 or stat.st_size > max_blob_bytes:
+            blockers.append(f"seedgen staging entry violates blob-size cap: {entry.name}")
+            continue
+        data = entry.read_bytes()
+        if len(data) != stat.st_size or len(data) > max_blob_bytes:
+            blockers.append(f"seedgen staging entry changed during validation: {entry.name}")
+            continue
+        expected_name = "seedgen-" + hashlib.sha256(data).hexdigest()[:16]
+        if entry.name != expected_name:
+            blockers.append(f"seedgen staging entry has an invalid digest name: {entry.name}")
             continue
         generated += 1
         if len(blob_names) < MAX_PROVENANCE_BLOBS:
             blob_names.append(entry.name)
-        destination = seeds_dir / entry.name
+        destination = seeds_dir / expected_name
         if not destination.exists():
             shutil.move(str(entry), destination)
             merged_new += 1

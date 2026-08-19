@@ -3,6 +3,8 @@ from pathlib import Path
 
 from agentic_fuzz_engine.seedgen import run_seedgen
 
+_AUTHORED_ENV = {"AGENTIC_FUZZ_ALLOW_AUTHORED_SCRIPTS": "1"}
+
 
 def _write(path: Path, text: str) -> Path:
     path.write_text(text, encoding="utf-8")
@@ -21,7 +23,7 @@ def test_seedgen_writes_deduped_blobs_with_provenance(tmp_path):
         count=64,
         max_seconds=30,
         workspace_root=str(tmp_path / "ws"),
-        env={},
+        env=_AUTHORED_ENV,
     )
     assert result["ok"], result
     seeds = list(Path(result["seeds_dir"]).iterdir())
@@ -38,7 +40,7 @@ def test_seedgen_writes_deduped_blobs_with_provenance(tmp_path):
         count=64,
         max_seconds=30,
         workspace_root=str(tmp_path / "ws"),
-        env={},
+        env=_AUTHORED_ENV,
     )
     assert again["provenance"]["merged_new"] == 0
 
@@ -61,7 +63,7 @@ def test_seedgen_counts_errors_and_truncates_oversize(tmp_path):
         max_seconds=30,
         max_blob_bytes=1024,
         workspace_root=str(tmp_path / "ws"),
-        env={},
+        env=_AUTHORED_ENV,
     )
     assert result["ok"], result
     assert result["provenance"]["errors"] > 0
@@ -77,7 +79,7 @@ def test_seedgen_missing_generate_is_blocker(tmp_path):
         script_path=str(script),
         count=8,
         workspace_root=str(tmp_path / "ws"),
-        env={},
+        env=_AUTHORED_ENV,
     )
     assert not result["ok"]
     assert any("generate" in blocker for blocker in result["blockers"])
@@ -100,7 +102,7 @@ def test_seedgen_timeout_keeps_partial_blobs(tmp_path):
         count=100,
         max_seconds=2,
         workspace_root=str(tmp_path / "ws"),
-        env={},
+        env=_AUTHORED_ENV,
     )
     assert not result["ok"]
     assert any("wall clock" in blocker for blocker in result["blockers"])
@@ -111,7 +113,7 @@ def test_seedgen_missing_script_is_blocker(tmp_path):
         target="demo5",
         script_path=str(tmp_path / "nope.py"),
         workspace_root=str(tmp_path / "ws"),
-        env={},
+        env=_AUTHORED_ENV,
     )
     assert not result["ok"]
     assert any("not found" in blocker for blocker in result["blockers"])
@@ -138,7 +140,7 @@ def test_seedgen_mutate_mode_riffs_on_corpus(tmp_path):
         mode="mutate",
         sample_max=8,
         workspace_root=str(ws),
-        env={},
+        env=_AUTHORED_ENV,
     )
     assert result["ok"], result
     assert result["provenance"]["mode"] == "mutate"
@@ -161,7 +163,7 @@ def test_seedgen_mutate_requires_mutate_function(tmp_path):
     script = _write(tmp_path / "gen.py", "def generate(rnd):\n    return b'A'\n")
     result = run_seedgen(
         target="demo", script_path=str(script), mode="mutate",
-        workspace_root=str(ws), env={},
+        workspace_root=str(ws), env=_AUTHORED_ENV,
     )
     assert not result["ok"]
     assert any("mutate(rnd, seed)" in blocker for blocker in result["blockers"])
@@ -172,7 +174,7 @@ def test_seedgen_mutate_requires_corpus(tmp_path):
     script = _write(tmp_path / "mut.py", "def mutate(rnd, seed):\n    return seed\n")
     result = run_seedgen(
         target="demo", script_path=str(script), mode="mutate",
-        workspace_root=str(ws), env={},
+        workspace_root=str(ws), env=_AUTHORED_ENV,
     )
     assert not result["ok"]
     assert any("non-empty corpus" in blocker for blocker in result["blockers"])
@@ -182,7 +184,7 @@ def test_seedgen_provenance_records_blob_names(tmp_path):
     script = _write(tmp_path / "gen.py", "def generate(rnd):\n    return bytes([rnd.randrange(8)])\n")
     result = run_seedgen(
         target="demo", script_path=str(script), count=32,
-        workspace_root=str(tmp_path / "ws"), env={},
+        workspace_root=str(tmp_path / "ws"), env=_AUTHORED_ENV,
     )
     assert result["ok"], result
     blobs = result["provenance"]["blobs"]

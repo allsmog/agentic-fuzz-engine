@@ -129,6 +129,22 @@ class SweepTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertTrue(any("command required" in b for b in result["blockers"]))
 
+    def test_driver_launch_failure_is_a_blocker_with_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._workspace(Path(tmp))
+            broken = root / "valgrind-broken"
+            broken.write_text("#!/bin/sh\necho missing-driver >&2\nexit 127\n", encoding="utf-8")
+            broken.chmod(broken.stat().st_mode | stat.S_IXUSR)
+            result = valgrind_sweep(
+                target="localfuzz/c/demo",
+                command=["/bin/true"],
+                workspace_root=root,
+                valgrind_path=str(broken),
+            )
+            self.assertFalse(result["ok"])
+            self.assertIn("exit 127", result["blockers"][0])
+            self.assertIn("missing-driver", result["blockers"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

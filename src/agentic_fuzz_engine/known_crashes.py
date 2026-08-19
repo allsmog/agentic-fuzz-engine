@@ -22,11 +22,11 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from pathlib import Path
 from typing import Any, Mapping
 
 from .crash_identity import parse_crash_output, root_signature
+from .process_safety import bounded_run, tool_env
 
 KNOWN_CRASHES_FILE = "known-crashes.json"
 KNOWN_INPUTS_DIR = "known-crash-inputs"
@@ -181,18 +181,10 @@ def _probe_replay(
     argv = [str(path) if token == "{poc}" else token for token in replay_command]
     if "{poc}" not in replay_command:
         argv = [*argv, str(path)]
-    try:
-        completed = subprocess.run(
-            argv,
-            capture_output=True,
-            timeout=max(1.0, float(timeout_seconds)),
-            env=dict(env) if env is not None else dict(os.environ),
-            check=False,
-        )
-    except (subprocess.TimeoutExpired, OSError):
+    completed = bounded_run(argv, env=tool_env(env), timeout_seconds=max(1.0, float(timeout_seconds)), max_output_chars=MAX_PROBE_OUTPUT_BYTES)
+    if completed.timed_out or completed.exit_code == 127:
         return ""
-    combined = (completed.stderr or b"") + b"\n" + (completed.stdout or b"")
-    return combined[:MAX_PROBE_OUTPUT_BYTES].decode("utf-8", errors="replace")
+    return (completed.stderr + "\n" + completed.stdout)[:MAX_PROBE_OUTPUT_BYTES]
 
 
 def _quarantine(path: Path, quarantine: Path, signature: str) -> None:

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
 from .fidelity import REFERENCE_PROJECTS_RELATIVE, FixtureBenchmark, discover_reference_benchmarks, load_target_profile, resolve_reference_root
+from .process_safety import bounded_run, tool_env
 
 
 MAX_COMPILE_TIMEOUT_SECONDS = 120.0
@@ -208,26 +208,8 @@ def _build_direct_replay_binary(
         command.insert(1, "-std=c++17")
 
     timeout = _bounded_timeout(timeout_seconds)
-    try:
-        proc = subprocess.run(
-            command,
-            cwd=str(project_source_dir) if project_source_dir.exists() else None,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
-        timed_out = False
-        returncode = proc.returncode
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        returncode = 124
-        stdout = _coerce_output(exc.stdout)
-        stderr = _coerce_output(exc.stderr) + "\nTIMEOUT"
+    proc = bounded_run(command, cwd=str(project_source_dir) if project_source_dir.exists() else None, env=tool_env(), timeout_seconds=timeout)
+    timed_out, returncode, stdout, stderr = proc.timed_out, proc.exit_code, proc.stdout, proc.stderr
 
     ok = returncode == 0 and binary.exists()
     return {
