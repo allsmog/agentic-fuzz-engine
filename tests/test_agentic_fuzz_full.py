@@ -353,7 +353,10 @@ class AgenticFuzzFullRuntimeTests(unittest.TestCase):
         self.assertTrue(script.exists())
         self.assertIn("fidelity-oss-fuzz-build-replay", content)
         self.assertIn("runs/remote-amd64", content)
-        self.assertIn("docker pull ghcr.io/agentic-fuzz/base-runner:v1.3.0", content)
+        self.assertIn("bash -s --", content)
+        self.assertIn("docker image inspect ghcr.io/agentic-fuzz/base-runner:v1.3.0", content)
+        self.assertNotIn("docker pull", content)
+        self.assertNotIn("--delete", content)
         self.assertNotIn("hcloud server create", content)
         self.assertNotIn("gcloud compute instances create", content)
 

@@ -8,6 +8,10 @@ Agentic Fuzz Engine is a local-first agentic fuzzing framework and Claude Code p
 
 The project is designed for researchers and engineers who want a practical agentic security testing loop around C, C++, and JVM targets while keeping execution explicit, inspectable, and local.
 
+## Distribution
+
+The PyPI wheel provides the Python runtime and `agentic-fuzz-engine` command-line tools only. It does not include the Claude Code plugin. Install the plugin separately from `claude-plugin/agentic-fuzz-engine` in a source checkout, or from the Claude Code marketplace when it is available there.
+
 ## Keywords
 
 agentic fuzzing, Claude Code plugin, MCP security tools, automated fuzzing, vulnerability research, security testing, libFuzzer, AFL++, LibAFL, SymCC, SymQEMU, Z3, CodeQL, Joern, SootUp, SARIF reachability, Jazzer, sanitizer triage, crash dedupe, patch validation
@@ -74,7 +78,7 @@ The plugin path is:
 claude-plugin/agentic-fuzz-engine
 ```
 
-If your Claude Code build supports local plugin directories, point it at that folder. The plugin also works through its local shell helpers without invoking Claude Code directly.
+If your Claude Code build supports local plugin directories, point it at that folder. The plugin is distributed separately from the runtime wheel and can also be installed from the Claude Code marketplace when available. Its local shell helpers work without invoking Claude Code directly.
 
 ### MCP Tools
 
@@ -115,21 +119,21 @@ Create or activate a Python environment, then install the package in editable mo
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[runtime]'
+python -m pip install -e '.[runtime,test]'
 ```
 
 Run the local readiness checks:
 
 ```bash
-PYTHONPATH=src claude-plugin/agentic-fuzz-engine/scripts/run-engine.sh runtime-doctor
-PYTHONPATH=src claude-plugin/agentic-fuzz-engine/scripts/run-engine.sh runtime-backend-status
-PYTHONPATH=src claude-plugin/agentic-fuzz-engine/scripts/run-engine.sh parity-full --strict
+agentic-fuzz-engine runtime-doctor
+agentic-fuzz-engine runtime-backend-status
+agentic-fuzz-engine parity-full --strict
 ```
 
 Run the test suite:
 
 ```bash
-PYTHONPATH=src python -m pytest -q
+pytest -q
 ```
 
 ## Command Examples
@@ -137,25 +141,25 @@ PYTHONPATH=src python -m pytest -q
 List available subcommands:
 
 ```bash
-PYTHONPATH=src python -m agentic_fuzz_engine.cli --help
+agentic-fuzz-engine --help
 ```
 
 Check real backend visibility:
 
 ```bash
-PYTHONPATH=src python -m agentic_fuzz_engine.cli runtime-backend-status
+agentic-fuzz-engine runtime-backend-status
 ```
 
 Validate the plugin, command files, agents, skills, and prompt contract:
 
 ```bash
-PYTHONPATH=src python -m agentic_fuzz_engine.cli parity-full --strict
+agentic-fuzz-engine parity-full --strict
 ```
 
 Prepare a cached patch environment from a local source tree:
 
 ```bash
-PYTHONPATH=src python -m agentic_fuzz_engine.cli patch-environment-prepare \
+agentic-fuzz-engine patch-environment-prepare \
   --source-dir /path/to/source \
   --pool-root /tmp/agentic-fuzz-patches \
   --env-name bug-001
@@ -164,7 +168,7 @@ PYTHONPATH=src python -m agentic_fuzz_engine.cli patch-environment-prepare \
 Run a bounded local fuzz ensemble when the required workers are installed:
 
 ```bash
-PYTHONPATH=src python -m agentic_fuzz_engine.cli fuzz-ensemble-run \
+agentic-fuzz-engine fuzz-ensemble-run \
   --work-dir /tmp/agentic-fuzz-work \
   --target localfuzz/c/example \
   --harness fuzz \
@@ -264,8 +268,8 @@ Agentic Fuzz Engine is intentionally local and explicit:
 Before running campaign work, use:
 
 ```bash
-PYTHONPATH=src claude-plugin/agentic-fuzz-engine/scripts/run-engine.sh runtime-doctor
-PYTHONPATH=src claude-plugin/agentic-fuzz-engine/scripts/run-engine.sh runtime-backend-status
+agentic-fuzz-engine runtime-doctor
+agentic-fuzz-engine runtime-backend-status
 ```
 
 ## Benchmark Fixtures
@@ -301,15 +305,15 @@ fixtures/reference/
 Run formatting or linting tools of your choice, then run the focused tests:
 
 ```bash
-PYTHONPATH=src python -m pytest -q
+pytest -q
 ```
 
 Useful plugin checks:
 
 ```bash
-PYTHONPATH=src claude-plugin/agentic-fuzz-engine/scripts/run-engine.sh parity-full --strict
-PYTHONPATH=src claude-plugin/agentic-fuzz-engine/scripts/run-engine.sh runtime-doctor
-PYTHONPATH=src claude-plugin/agentic-fuzz-engine/scripts/run-engine.sh runtime-backend-status
+agentic-fuzz-engine parity-full --strict
+agentic-fuzz-engine runtime-doctor
+agentic-fuzz-engine runtime-backend-status
 ```
 
 ## Suggested GitHub Topics
@@ -334,7 +338,7 @@ For repository discoverability, use topics like:
 
 ### Does this require hosted infrastructure?
 
-No. The default workflow is local. External services are not required for readiness checks, fixture validation, local campaign state, or report generation.
+No. The default workflow is local. External services are not required for readiness checks, fixture validation, local campaign state, or report generation. The optional remote replay helper connects only to the host, user, directory, and fixture root that you explicitly provide; it does not create machines, install packages, start services, or pull container images.
 
 ### Does it run real fuzzers?
 
