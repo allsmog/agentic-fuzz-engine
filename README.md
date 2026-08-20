@@ -10,7 +10,14 @@ The project is designed for researchers and engineers who want a practical agent
 
 ## Distribution
 
-The PyPI wheel provides the Python runtime and `agentic-fuzz-engine` command-line tools only. It does not include the Claude Code plugin. Install the plugin separately from `claude-plugin/agentic-fuzz-engine` in a source checkout, or from the Claude Code marketplace when it is available there.
+This repository has two separately installed surfaces:
+
+- The Python package provides the `agentic-fuzz-engine` CLI and the
+  `agentic-fuzz-engine-mcp` stdio server. It is not currently published on
+  PyPI; install it from this source checkout or build a wheel locally.
+- The Claude Code plugin lives in `claude-plugin/agentic-fuzz-engine` and
+  carries a vendored runtime so it can be installed independently of the
+  Python package. The wheel does not contain the plugin.
 
 ## Keywords
 
@@ -64,21 +71,30 @@ This repository is an early local runtime and Claude Code plugin. It is useful f
 
 ### Claude Code Plugin
 
-The plugin contains ready-to-use command and agent definitions for Claude Code:
+The plugin contains ready-to-use command and agent definitions for Claude Code.
+Common entry points include:
 
 - `/agentic-fuzz:ready`
 - `/agentic-fuzz:fuzz`
 - `/agentic-fuzz:sym`
 - `/agentic-fuzz:reach`
 - `/agentic-fuzz:patch-env`
+- `/agentic-fuzz:campaign-full`
+- `/agentic-fuzz:runtime-doctor`
+- `/agentic-fuzz:runtime-backend-status`
 
-The plugin path is:
+After cloning the repository, add its local marketplace and install the plugin:
 
 ```bash
-claude-plugin/agentic-fuzz-engine
+claude plugin marketplace add ./claude-plugin
+claude plugin install agentic-fuzz@agentic-fuzz-local
 ```
 
-If your Claude Code build supports local plugin directories, point it at that folder. The plugin is distributed separately from the runtime wheel and can also be installed from the Claude Code marketplace when available. Its local shell helpers work without invoking Claude Code directly.
+Run `claude plugin marketplace update agentic-fuzz-local` to refresh the
+catalog after pulling a newer release. The complete command catalog is under
+`claude-plugin/agentic-fuzz-engine/commands`. Plugin tools execute locally and
+may invoke explicitly configured binaries or containers; optional checkout
+tools and fidelity fixtures are not bundled with an installed plugin.
 
 ### MCP Tools
 
@@ -117,7 +133,8 @@ git clone https://github.com/allsmog/agentic-fuzz-engine.git
 cd agentic-fuzz-engine
 ```
 
-Create or activate a Python environment, then install the package in editable mode:
+Agentic Fuzz Engine requires Python 3.11 or newer. Create or activate a Python
+environment, then install the package in editable mode:
 
 ```bash
 python3 -m venv .venv
@@ -191,12 +208,16 @@ build outputs, persistent corpora, and campaign state.
 
 ```bash
 # one-time: create the workspace (DooD path maps, docker images, extra mounts, asset imports)
-cli workspace-init --map HOST=OUTER --source-dir /path/to/source --mount HOST=/container:ro --copy SRC=DEST_REL
+agentic-fuzz-engine workspace-init \
+  --source-dir /path/to/source \
+  --map /path/to/source=/outer/path/to/source \
+  --mount /path/to/source=/workspace/source:ro \
+  --copy /path/to/seeds=seed-import
 
 # pick the next unharnessed sink vector, generate its skeleton, build it
-cli target-select --sinks-jsonl sinks.jsonl
-cli target-scaffold <vector> --sinks-jsonl sinks.jsonl
-cli target-build localfuzz/c/<vector>
+agentic-fuzz-engine target-select --sinks-jsonl sinks.jsonl
+agentic-fuzz-engine target-scaffold example-target --sinks-jsonl sinks.jsonl
+agentic-fuzz-engine target-build localfuzz/c/example-target
 
 # or generate targets automatically from a workspace generator spec:
 #   type_enum        enumerate serializable types -> selector-dispatch harness
@@ -205,36 +226,50 @@ cli target-build localfuzz/c/<vector>
 # anything a generator cannot produce becomes .localfuzz/workorder.json for a
 # human/LLM author; the same build+smoke loop then validates the authored file
 # (authored files are never overwritten by regeneration).
-cli target-generate <vector> --spec <spec> --sinks-jsonl sinks.jsonl --validate
-cli target-generate --all --spec <spec> --sinks-jsonl sinks.jsonl --max-targets 10
+agentic-fuzz-engine target-generate example-target \
+  --spec /path/to/generator-spec.json \
+  --sinks-jsonl sinks.jsonl \
+  --validate
+agentic-fuzz-engine target-generate --all \
+  --spec /path/to/generator-spec.json \
+  --sinks-jsonl sinks.jsonl \
+  --max-targets 10
 
 # bounded, resource-guarded campaign rounds (defaults from campaign-policy.json)
-cli campaign-round-run localfuzz/c/<vector> --rounds 4 --klee-config tier.ci.json
+agentic-fuzz-engine campaign-round-run localfuzz/c/example-target \
+  --rounds 4 \
+  --klee-config tier.ci.json
 
 # campaign indexing and operator-reviewed advice over many targets
-cli candidates sync --sinks-jsonl sinks.jsonl   # lifecycle ledger from the sink inventory
-cli campaign-db sync                            # rebuild the bounded derived index
-cli campaign-db report --report summary         # named reports only; no raw SQL
-cli candidate-scoring report                    # deterministic advisory scores
-cli schedule-plan sync                          # disabled by default; never dispatches work
-cli schedule-plan list                          # suppresses stale ranks
-cli campaign-context sync --target <vector>      # delimited untrusted-data context
-cli plateau-status                              # per-target verdicts + next escalation rung
-cli candidates update <vector> --status escalated:dictionary --note "..."
-cli klee-pack-gen <vector>                      # plateaued libFuzzer target -> klee ci pack
-cli campaign-gc                                 # resumable corpus minimize + retention pruning
+agentic-fuzz-engine candidates sync --sinks-jsonl sinks.jsonl   # lifecycle ledger from the sink inventory
+agentic-fuzz-engine campaign-db sync                            # rebuild the bounded derived index
+agentic-fuzz-engine campaign-db report --report summary         # named reports only; no raw SQL
+agentic-fuzz-engine candidate-scoring report                    # deterministic advisory scores
+agentic-fuzz-engine schedule-plan sync                          # disabled by default; never dispatches work
+agentic-fuzz-engine schedule-plan list                          # suppresses stale ranks
+agentic-fuzz-engine campaign-context sync --target example-target
+agentic-fuzz-engine plateau-status                              # per-target verdicts + next escalation rung
+agentic-fuzz-engine candidates update example-target \
+  --status escalated:dictionary \
+  --note "dictionary escalation selected"
+agentic-fuzz-engine klee-pack-gen example-target                # requires explicit KLEE policy/image config
+agentic-fuzz-engine campaign-gc                                 # resumable corpus minimize + retention pruning
 ```
 
 The discovery and alternate-runtime lanes are also available directly:
 
 ```bash
-cli fork-scan --source-root /path/to/source --vendor-marker <marker>
-cli entry-scan --source-root /path/to/source --lib-prefix <prefix>
-cli differential-run <vector> \
+agentic-fuzz-engine fork-scan \
+  --source-root /path/to/source \
+  --vendor-marker third_party
+agentic-fuzz-engine entry-scan \
+  --source-root /path/to/source \
+  --lib-prefix libexample
+agentic-fuzz-engine differential-run example-target \
   --command-json '["/path/to/replay-a", "{input}"]' \
   --command-json '["/path/to/replay-b", "{input}"]'
-cli sanitizer-build <vector> msan
-cli sanitizer-sweep <vector> msan
+agentic-fuzz-engine sanitizer-build example-target msan
+agentic-fuzz-engine sanitizer-sweep example-target msan
 ```
 
 Fork, entry-point, differential, and scoring output is candidate evidence,
@@ -248,9 +283,10 @@ coverage/feature counts, parsed pre-clipping); `plateau-status` folds them
 into `growing / plateaued / insufficient-data` verdicts and recommends the
 next untried rung from the policy ladder. The ledger transitions
 automatically (`fuzzing`, `plateaued`, `confirmed`); `escalated:<rung>` and
-`dead` are operator decisions — dead budget gets reallocated instead of
-silently burned. GC runs every N rounds: corpus minimization is resumable
-(`-merge_control_file`) and only swaps atomically on clean completion.
+`dead` are operator decisions. Plateau and schedule output can recommend a
+different allocation, but neither dispatches work automatically. GC runs every
+N rounds: corpus minimization is resumable (`-merge_control_file`) and only
+swaps atomically on clean completion.
 
 Every lane is bounded and sequential: libFuzzer runs with an explicit RSS
 limit and `-max_total_time`, the SymCC corpus sync runs one input at a time
@@ -268,8 +304,12 @@ The plugin breaks the workflow into specialist roles so a Claude Code session ca
 - `harness-builder`: discovers build systems and runnable harnesses
 - `native-harness`: coordinates bounded local C/C++ harness execution
 - `input-generator`: creates dictionaries, grammar artifacts, and seed plans
+- `dictionary-generator`: derives bounded dictionary candidates
+- `grammar-reverser`: derives structured-input grammar candidates
 - `concolic-generator`: plans branch-targeted symbolic inputs
 - `fuzz-finder`: runs fuzzing loops and records crash evidence
+- `vuln-hunter`: prioritizes evidence-backed vulnerability leads
+- `pov-producer`: turns verified crash evidence into reproducible proofs
 - `corpus-manager`: imports and promotes seeds, crashes, and artifacts
 - `crash-grader`: grades sanitizer evidence and proof stability
 - `dedupe-judge`: groups equivalent findings
