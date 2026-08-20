@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --locked --extra runtime --extra test
+      - run: uv run pytest -q
+      - run: uv run python -m agentic_fuzz_engine.cli parity-full --strict
+      - run: uv run python -m agentic_fuzz_engine.cli runtime-doctor
+      - run: bash -n scripts/remote-amd64-oss-fuzz-replay.sh
+      - run: shellcheck scripts/remote-amd64-oss-fuzz-replay.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install --global @anthropic-ai/claude-code@2.1.235
+      - run: claude plugin validate --strict claude-plugin/agentic-fuzz-engine
+      - run: uv build
+      - run: |
+          wheel="$(find "$GITHUB_WORKSPACE/dist" -name '*.whl' -print -quit)"
+          test -n "$wheel"
+          wheel_test_dir="$(mktemp -d)"
+          trap 'rm -rf "$wheel_test_dir"' EXIT
+          cd "$wheel_test_dir"
+          uv run --isolated --no-project --with "$wheel" python -c 'import agentic_fuzz_engine; import agentic_fuzz_full'
+          uv run --isolated --no-project --with "$wheel" agentic-fuzz-engine --help
+          uv run --isolated --no-project --with "$wheel" agentic-fuzz-engine runtime-backend-status

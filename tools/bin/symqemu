@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+image="${AGENTIC_FUZZ_SYMQEMU_IMAGE:-${AGENTIC_FUZZ_SYMQEMU_IMAGE:-agentic-fuzz/symqemu:latest}}"
+cwd="$(pwd)"
+project_root="${CLAUDE_PROJECT_DIR:-}"
+docker_bin="${DOCKER_BIN:-}"
+if [ -z "${docker_bin}" ]; then
+  docker_bin="$(command -v docker || true)"
+fi
+for candidate in /opt/homebrew/bin/docker /usr/local/bin/docker /usr/bin/docker; do
+  if [ -z "${docker_bin}" ] && [ -x "${candidate}" ]; then
+    docker_bin="${candidate}"
+  fi
+done
+if [ -z "${docker_bin}" ]; then
+  echo "docker not found" >&2
+  exit 127
+fi
+env_args=()
+for name in SYMCC_OUTPUT_DIR SYMCC_INPUT_FILE SYMCC_AFL_COVERAGE_MAP; do
+  if [ -n "${!name:-}" ]; then
+    env_args=(-e "${name}" "${env_args[@]}")
+  fi
+done
+mount_args=(-v "${cwd}:${cwd}" -v "/tmp:/tmp")
+if [ -n "${project_root}" ] && [ -d "${project_root}" ] && [ "${project_root}" != "${cwd}" ]; then
+  mount_args=(-v "${project_root}:${project_root}" "${mount_args[@]}")
+fi
+platform_args=()
+if [ -n "${AGENTIC_FUZZ_SYMQEMU_PLATFORM:-}" ]; then
+  platform_args=(--platform "${AGENTIC_FUZZ_SYMQEMU_PLATFORM}")
+elif [ -n "${AGENTIC_FUZZ_SYMQEMU_PLATFORM:-}" ]; then
+  platform_args=(--platform "${AGENTIC_FUZZ_SYMQEMU_PLATFORM}")
+elif [ -n "${AGENTIC_FUZZ_SYMBOLIC_PLATFORM:-}" ]; then
+  platform_args=(--platform "${AGENTIC_FUZZ_SYMBOLIC_PLATFORM}")
+elif [ -n "${AGENTIC_FUZZ_SYMBOLIC_PLATFORM:-}" ]; then
+  platform_args=(--platform "${AGENTIC_FUZZ_SYMBOLIC_PLATFORM}")
+fi
+
+exec "${docker_bin}" run "${platform_args[@]}" --rm \
+  "${env_args[@]}" \
+  "${mount_args[@]}" \
+  -w "${cwd}" \
+  "${image}" \
+  bash -lc 'for candidate in /symqemu_source/build/symqemu-x86_64 /symqemu_source/build/qemu-x86_64 /symqemu_source/build/qemu-bundle/usr/local/bin/qemu-x86_64; do [ -x "$candidate" ] && exec "$candidate" "$@"; done; bin="$(command -v symqemu-x86_64 || command -v qemu-x86_64 || find /symqemu_source -type f \( -name symqemu-x86_64 -o -name qemu-x86_64 \) 2>/dev/null | head -1)"; test -n "$bin"; exec "$bin" "$@"' bash "$@"

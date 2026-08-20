@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+jar="${repo_root}/tools/sootup-cli/target/sootup-cli-0.1.0.jar"
+
+if [ ! -f "${jar}" ]; then
+  echo "SootUp CLI jar is missing; run: mvn -q -f ${repo_root}/tools/sootup-cli/pom.xml package" >&2
+  exit 127
+fi
+
+exec java -jar "${jar}" "$@"

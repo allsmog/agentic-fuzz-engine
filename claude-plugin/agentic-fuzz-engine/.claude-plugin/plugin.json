@@ -1,0 +1,13 @@
+{
+  "name": "agentic-fuzz",
+  "displayName": "Agentic Fuzz Engine",
+  "version": "0.1.0",
+  "description": "Local C/C++ fuzzing workflows for Claude Code. Plugin tools and configured containers can execute locally; optional checkout tools and fidelity fixtures are not bundled.",
+  "author": {
+    "name": "Agentic Fuzz Engine"
+  },
+  "mcpServers": "./.mcp.json",
+  "experimental": {
+    "monitors": "./monitors/monitors.json"
+  }
+}

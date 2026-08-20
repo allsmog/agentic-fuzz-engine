@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+jazzer_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../jazzer" && pwd)"
+
+java_home_candidates=()
+if [[ -n "${JAVA_HOME:-}" ]]; then
+  java_home_candidates+=("${JAVA_HOME}" "${JAVA_HOME}/libexec/openjdk.jdk/Contents/Home")
+fi
+if command -v /usr/libexec/java_home >/dev/null 2>&1; then
+  java_home="$(/usr/libexec/java_home 2>/dev/null || true)"
+  if [[ -n "${java_home}" ]]; then
+    java_home_candidates+=("${java_home}")
+  fi
+fi
+if command -v java >/dev/null 2>&1; then
+  java_home="$(
+    java -XshowSettings:properties -version 2>&1 \
+      | awk -F'= ' '/^[[:space:]]*java\.home = / {print $2; exit}'
+  )"
+  if [[ -n "${java_home}" ]]; then
+    java_home_candidates+=("${java_home}")
+  fi
+fi
+java_home_candidates+=(
+  "/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home"
+  "/usr/local/opt/openjdk/libexec/openjdk.jdk/Contents/Home"
+)
+
+for candidate in "${java_home_candidates[@]}"; do
+  if [[ -f "${candidate}/lib/server/libjvm.dylib" ]]; then
+    export JAVA_HOME="${candidate}"
+    break
+  fi
+done
+
+if [[ -n "${JAVA_HOME:-}" ]]; then
+  export DYLD_LIBRARY_PATH="${JAVA_HOME}/lib/server${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}"
+fi
+exec "${jazzer_root}/jazzer" --agent_path="${jazzer_root}/jazzer_standalone.jar" "$@"
